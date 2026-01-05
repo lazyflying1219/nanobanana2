@@ -439,9 +439,9 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             this.sourceTabsEl = document.getElementById('banana-source-tabs');
             this.categoryTabsEl = document.getElementById('banana-category-tabs');
 
-            const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md']);
-            const savedSourceId = (localStorage.getItem('banana_source_id') || '').trim();
-            const preferredSourceId = supportedSourceIds.has(savedSourceId) ? savedSourceId : 'banana_online';
+             const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md', 'local_prompts3_md']);
+             const savedSourceId = (localStorage.getItem('banana_source_id') || '').trim();
+             const preferredSourceId = supportedSourceIds.has(savedSourceId) ? savedSourceId : 'banana_online';
 
             this.activeSourceId = supportedSourceIds.has(preferredSourceId) ? preferredSourceId : 'banana_online';
             this.updateSourceTabsUI();
@@ -772,9 +772,9 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             if(this.allData.length === 0 || this.loadedSourceId !== this.activeSourceId) this.fetchData();
         },
         close() { this.modal.classList.remove('active'); },
-        changeSource(sourceId) {
-            const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md']);
-            const nextSourceId = supportedSourceIds.has((sourceId || '').trim()) ? sourceId.trim() : 'banana_online';
+         changeSource(sourceId) {
+             const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md', 'local_prompts3_md']);
+             const nextSourceId = supportedSourceIds.has((sourceId || '').trim()) ? sourceId.trim() : 'banana_online';
 
             if (nextSourceId === this.activeSourceId && this.loadedSourceId === nextSourceId) {
                 this.updateSourceTabsUI();
@@ -821,15 +821,17 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
 
             try {
                 let data = [];
-                if (this.activeSourceId === 'banana_online') {
-                    data = await this.loadBananaOnline();
-                } else if (this.activeSourceId === 'local_prompts_json') {
-                    data = await this.loadOpenNanaLocalJson();
-                } else if (this.activeSourceId === 'local_prompts2_md') {
-                    data = await this.loadYouMindLocalMarkdown();
-                } else {
-                    throw new Error(`未知提示词源：${this.activeSourceId}`);
-                }
+                 if (this.activeSourceId === 'banana_online') {
+                     data = await this.loadBananaOnline();
+                 } else if (this.activeSourceId === 'local_prompts_json') {
+                     data = await this.loadOpenNanaLocalJson();
+                 } else if (this.activeSourceId === 'local_prompts2_md') {
+                     data = await this.loadYouMindLocalJson();
+                 } else if (this.activeSourceId === 'local_prompts3_md') {
+                     data = await this.loadAiArtPicsLocalMarkdown();
+                 } else {
+                     throw new Error(`未知提示词源：${this.activeSourceId}`);
+                 }
 
                 if (requestId !== this.requestSeq) return;
 
@@ -864,10 +866,10 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             const raw = error && error.message ? String(error.message) : '';
             const sourceId = this.activeSourceId;
 
-            if (sourceId === 'local_prompts_json' || sourceId === 'local_prompts2_md') {
-                if (typeof location !== 'undefined' && location.protocol === 'file:') {
-                    return '当前通过本地文件方式打开，浏览器限制导致无法加载本地提示词库，请通过本地服务器访问。';
-                }
+             if (sourceId === 'local_prompts_json' || sourceId === 'local_prompts2_md' || sourceId === 'local_prompts3_md') {
+                 if (typeof location !== 'undefined' && location.protocol === 'file:') {
+                     return '当前通过本地文件方式打开，浏览器限制导致无法加载本地提示词库，请通过本地服务器访问。';
+                 }
                 if (raw.includes('404')) {
                     return '未找到本地提示词数据，请确认已放在同级目录并通过本地服务器访问。';
                 }
@@ -964,7 +966,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             const base = 'https://opennana.com/awesome-prompt-gallery/';
             const placeholder = this.getPlaceholderPreview();
 
-            return json.items.map((item, idx) => {
+             return json.items.map((item, idx) => {
                 const it = (item && typeof item === 'object') ? item : {};
                 const prompts = Array.isArray(it.prompts) ? it.prompts.filter(Boolean) : [];
                 const combinedPrompt = prompts.length > 0 ? prompts.join('\n\n---\n\n') : this.normalizeText(it.prompt, '');
@@ -982,10 +984,31 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     tags: Array.isArray(it.tags) ? it.tags : []
                 };
             });
-        },
-        parseYouMindMarkdown(text) {
-            const placeholder = this.getPlaceholderPreview();
-            const lines = String(text || '').split(/\r?\n/);
+         },
+         async loadYouMindLocalJson() {
+             if (typeof location !== 'undefined' && location.protocol === 'file:') {
+                 throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
+             }
+             const res = await nativeFetch('./youmind_prompts.json');
+             if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
+             const data = await res.json();
+             if (!Array.isArray(data)) throw new Error('本地提示词数据格式不正确：需要 JSON 数组');
+
+             const safeData = data.filter(item => {
+                 const normalized = (item && typeof item === 'object') ? item : {};
+                 const category = this.normalizeText(normalized.category, '').toLowerCase();
+                 const subCategory = this.normalizeText(normalized.sub_category, '').toLowerCase();
+                 const tags = Array.isArray(normalized.tags) ? normalized.tags.map(t => String(t || '').toLowerCase()) : [];
+                 const hasNsfw = category.includes('nsfw') || subCategory.includes('nsfw') || tags.some(t => t.includes('nsfw'));
+                 return !hasNsfw;
+             });
+
+             if (safeData.length === 0) throw new Error('数据加载失败（过滤后为空）');
+             return safeData;
+         },
+         parseYouMindMarkdown(text) {
+             const placeholder = this.getPlaceholderPreview();
+             const lines = String(text || '').split(/\r?\n/);
             const items = [];
             const seen = new Set();
 
@@ -1088,23 +1111,216 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 }
             }
 
-            return items;
-        },
-        async loadYouMindLocalMarkdown() {
-            if (typeof location !== 'undefined' && location.protocol === 'file:') {
-                throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
-            }
-            const res = await nativeFetch('./prompts2.md');
-            if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
-            const text = await res.text();
-            const items = this.parseYouMindMarkdown(text);
-            if (!items.length) throw new Error('未从本地提示词文档解析到提示词，请确认文件内容完整');
-            return items;
-        },
-        filter(type, btnEl) {
-            this.currentFilter = type;
-            document.querySelectorAll('.banana-tab').forEach(t => t.classList.remove('active'));
-            btnEl.classList.add('active');
+             return items;
+         },
+         inferAiArtMode(text) {
+             const t = this.normalizeText(text, '').toLowerCase();
+             if (!t) return 'generate';
+             const signals = [
+                 'upload', 'uploaded', 'attach', 'attached', 'reference image', 'input image', 'use the uploaded',
+                 '上传', '参考图', '垫图', '附图', '用这张图', '用上传的',
+                 '添付', '添付画像', '画像をアップロード', 'この画像', '参照画像'
+             ];
+             return signals.some(s => t.includes(s)) ? 'edit' : 'generate';
+         },
+         inferAiArtPrimaryCategory(title, prompt) {
+             const raw = `${this.normalizeText(title, '')}\n${this.normalizeText(prompt, '')}`.toLowerCase();
+             const rules = [
+                 { tag: '信息图', keys: ['infographic', '信息图', 'diagram', '图解'] },
+                 { tag: '表情包', keys: ['line', 'sticker', '表情包', 'スタンプ', 'emoji'] },
+                 { tag: '海报', keys: ['poster', '海报'] },
+                 { tag: '产品展示', keys: ['product', 'packaging', '包装', '产品'] },
+                 { tag: '人像', keys: ['portrait', '人像', '肖像'] },
+                 { tag: '摄影', keys: ['photography', 'photo', 'photoreal', '照片', '摄影'] },
+                 { tag: '插画', keys: ['illustration', '插画'] },
+                 { tag: '3D', keys: ['3d', '三维', 'c4d', 'blender'] },
+                 { tag: 'UI', keys: ['ui', '界面', 'app ui', '网页'] },
+                 { tag: 'Logo', keys: ['logo', '标志'] },
+                 { tag: '建筑', keys: ['architecture', '建筑'] },
+                 { tag: '风景', keys: ['landscape', '风景'] },
+                 { tag: '美食', keys: ['food', '美食'] }
+             ];
+             const hit = rules.find(rule => rule.keys.some(k => raw.includes(k)));
+             return hit ? hit.tag : 'AIArtPics';
+         },
+         parseAiArtPicsMarkdown(text) {
+             const placeholder = this.getPlaceholderPreview();
+             const lines = String(text || '').split(/\r?\n/);
+             const items = [];
+             const usedIds = new Set();
+
+             const titleReg = /^###\s+\[([^\]]+)\]\((https?:\/\/[^)]+)\)\s*$/;
+             const authorReg = /^\*\*作者\*\*:\s*\[([^\]]+)\]\(([^)]+)\)\s*$/;
+             const sourceReg = /^\*\*来源\*\*:\s*\[([^\]]+)\]\(([^)]+)\)\s*$/;
+             const imgReg = /<img[^>]+src=\"([^\"]+)\"/i;
+
+             const isBadgeUrl = (url) => {
+                 const u = this.normalizeText(url, '').toLowerCase();
+                 return u.includes('img.shields.io/') || u.includes('awesome.re/badge') || u.includes('badge.svg');
+             };
+
+             const normalizeHeadingText = (raw) => {
+                 const t = this.normalizeText(raw, '').replace(/^#+\s*/, '').trim();
+                 return t.replace(/\s{2,}/g, ' ');
+             };
+
+             const extractSlug = (url) => {
+                 try {
+                     const u = new URL(url);
+                     const parts = u.pathname.split('/').filter(Boolean);
+                     const idx = parts.lastIndexOf('prompt');
+                     if (idx > -1 && parts[idx + 1]) return parts[idx + 1];
+                     return parts.length ? parts[parts.length - 1] : '';
+                 } catch (_) {
+                     return '';
+                 }
+             };
+
+             let currentH2 = '';
+             let current = null;
+             let inFence = false;
+             let fenceBuf = [];
+             let capturedPrompt = false;
+
+             const flush = () => {
+                 if (!current) return;
+                 const title = this.normalizeText(current.title, '');
+                 const prompt = this.normalizeText(current.prompt, '');
+                 if (!title || !prompt) { current = null; return; }
+
+                 const slug = extractSlug(current.pageLink);
+                 let id = slug ? `aiart_${slug}` : `aiart_${items.length + 1}`;
+                 if (usedIds.has(id)) id = `${id}_${items.length + 1}`;
+                 usedIds.add(id);
+
+                 const category = this.inferAiArtPrimaryCategory(title, prompt);
+                 const mode = this.inferAiArtMode(prompt);
+
+                 const tags = [];
+                 const srcLabel = this.normalizeText(current.sourceLabel, '');
+                 if (srcLabel) tags.push(srcLabel);
+                 if (category && category !== 'AIArtPics') tags.push(category);
+                 if (mode === 'edit') tags.push('参考图');
+
+                 const author = this.normalizeText(current.author, current.sectionTitle || 'AIArtPics');
+                 const preview = current.images && current.images.length > 0 ? current.images[0] : placeholder;
+
+                 items.push({
+                     id,
+                     title,
+                     prompt,
+                     category,
+                     mode,
+                     preview: isBadgeUrl(preview) ? placeholder : preview,
+                     author: this.sanitizeAuthor(author),
+                     link: this.normalizeText(current.pageLink, ''),
+                     tags: Array.from(new Set(tags.filter(Boolean))),
+                     source_link: this.normalizeText(current.sourceLink, ''),
+                     images: Array.isArray(current.images) ? current.images : []
+                 });
+
+                 current = null;
+             };
+
+             for (let i = 0; i < lines.length; i++) {
+                 const line = lines[i];
+
+                 if (inFence) {
+                     if (/^```/.test(line)) {
+                         inFence = false;
+                         if (!capturedPrompt && current) {
+                             current.prompt = fenceBuf.join('\n').trim();
+                             capturedPrompt = true;
+                         }
+                         fenceBuf = [];
+                         continue;
+                     }
+                     fenceBuf.push(line);
+                     continue;
+                 }
+
+                 if (/^##\s+/.test(line)) {
+                     currentH2 = normalizeHeadingText(line);
+                     continue;
+                 }
+
+                 const header = line.match(titleReg);
+                 if (header) {
+                     flush();
+                     current = {
+                         title: header[1].trim(),
+                         pageLink: header[2].trim(),
+                         sectionTitle: currentH2,
+                         author: '',
+                         authorLink: '',
+                         sourceLabel: '',
+                         sourceLink: '',
+                         images: [],
+                         prompt: ''
+                     };
+                     capturedPrompt = false;
+                     continue;
+                 }
+
+                 if (!current) continue;
+
+                 const authorMatch = line.match(authorReg);
+                 if (authorMatch) {
+                     current.author = authorMatch[1].trim();
+                     current.authorLink = authorMatch[2].trim();
+                     continue;
+                 }
+
+                 const sourceMatch = line.match(sourceReg);
+                 if (sourceMatch) {
+                     current.sourceLabel = sourceMatch[1].trim();
+                     current.sourceLink = sourceMatch[2].trim();
+                     continue;
+                 }
+
+                 const imgMatch = line.match(imgReg);
+                 if (imgMatch) {
+                     const url = imgMatch[1] ? imgMatch[1].trim() : '';
+                     if (url && !isBadgeUrl(url)) current.images.push(url);
+                     continue;
+                 }
+
+                 if (!capturedPrompt && /^```/.test(line)) {
+                     inFence = true;
+                     fenceBuf = [];
+                     continue;
+                 }
+             }
+
+             flush();
+             return items;
+         },
+         async loadYouMindLocalMarkdown() {
+             if (typeof location !== 'undefined' && location.protocol === 'file:') {
+                 throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
+             }
+             const res = await nativeFetch('./prompts2.md');
+             if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
+             const text = await res.text();
+             const items = this.parseYouMindMarkdown(text);
+             if (!items.length) throw new Error('未从本地提示词文档解析到提示词，请确认文件内容完整');
+             return items;
+         },
+         async loadAiArtPicsLocalMarkdown() {
+             if (typeof location !== 'undefined' && location.protocol === 'file:') {
+                 throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
+             }
+             const res = await nativeFetch('./prompts3.md');
+             if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
+             const text = await res.text();
+             const items = this.parseAiArtPicsMarkdown(text);
+             if (!items.length) throw new Error('未从本地提示词文档解析到提示词，请确认文件内容完整');
+             return items;
+         },
+         filter(type, btnEl) {
+             this.currentFilter = type;
+             document.querySelectorAll('.banana-tab').forEach(t => t.classList.remove('active'));
+             btnEl.classList.add('active');
             this.render();
         },
         handleSearch(val) {
