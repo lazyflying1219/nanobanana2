@@ -59,6 +59,7 @@ Gemini 3 Pro Image Preview 是一个基于 Google Gemini 3 Pro 模型的现代�
 - 集成 [Banana Prompt](https://github.com/glidea/banana-prompt-quicker) 提示词库
 - 快速搜索和使用优质提示词
 - 支持分类筛选（绘图/生活/学习/工作等）
+- 支持在界面切换提示词源（在线 Banana Prompt / 本地 `prompts.json` / 本地 `prompts2.md`）
 
 ##### 📚 我的提示词
 - 管理个人提示词库
@@ -130,6 +131,8 @@ php -S localhost:8000
 ```
 http://localhost:8000
 ```
+
+> 提示：如需使用本地提示词源（`prompts.json` / `prompts2.md`），请将文件放在与 `index.html` 同级目录，并通过本地服务器访问（`file://` 可能会被浏览器拦截）。
 
 ### 配置 API
 

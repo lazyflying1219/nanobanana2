@@ -305,14 +305,19 @@
     <!-- XHS Modal - V7 三栏布局 -->
     <div id="xhs-modal" class="xhs-modal">
         <div class="xhs-header">
-            <div class="xhs-toggle-btn" onclick="toggleXHSSidebar()">
+            <div class="xhs-toggle-btn" onclick="toggleXHSSidebar()" title="展开/收起侧栏（文案生成配置/历史记录）">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
             </div>
             <div class="xhs-title-bar">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:#ff2e4d;"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
                 <span style="margin-left:8px;">XHS 灵感实验室</span>
             </div>
-            <div class="xhs-toggle-btn" onclick="XHSCreator.close()">✕</div>
+            <div class="xhs-header-actions">
+                <div class="xhs-toggle-btn" onclick="toggleSettings(true)" title="打开右侧设置（API 渠道管理）">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                </div>
+                <div class="xhs-toggle-btn" onclick="XHSCreator.close()" title="关闭">✕</div>
+            </div>
         </div>
 
         <div class="xhs-sidebar-overlay" id="xhs-sidebar-overlay" onclick="toggleXHSSidebar()"></div>
@@ -323,7 +328,7 @@
                     <details class="xhs-config-card" style="cursor:pointer;" open>
                         <summary class="xhs-section-label" style="list-style:none; user-select:none;">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:4px;"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6M5.64 5.64l4.24 4.24m4.24 4.24l4.24 4.24M1 12h6m6 0h6M5.64 18.36l4.24-4.24m4.24-4.24l4.24-4.24"/></svg>
-                            文案生成 API 配置
+                            文案生成 API（可选）
                         </summary>
                         <div style="margin-top:12px;">
                             <div class="config-group">
@@ -375,8 +380,8 @@
                             </div>
                             <button class="xhs-save-btn" onclick="XHSCreator.saveTextSettings()">保存配置</button>
                             <div style="font-size:11px;color:#888;margin-top:12px;line-height:1.4;">
-                                💡 提示：使用 OpenAI 兼容格式的 API<br>
-                                📌 文案生成独立配置，不影响绘图设置<br>
+                                💡 提示：这里是可选的文案独立配置（OpenAI 兼容接口）<br>
+                                📌 未填写时，默认使用右侧“API 渠道管理”的配置生成文案<br>
                                 ✨ 可将常用模型添加到快速选择列表
                             </div>
                         </div>
@@ -458,29 +463,29 @@
             </div>
         </div>
         <div style="flex: 1; display: flex; flex-direction: column; max-width: 1200px; margin: 0 auto; width: 100%; padding: 24px; overflow-y: auto; padding-top: 80px;">
-            <div class="banana-search-wrapper">
-                <svg class="banana-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="11" cy="11" r="8"></circle>
-                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                </svg>
-                <input type="text" class="banana-search-input" placeholder="搜索关键词 (标题、提示词、分类)..." oninput="BananaTool.handleSearch(this.value)">
-            </div>
-            <div class="banana-tabs">
-                <div class="banana-tab active" onclick="BananaTool.filter('all', this)">全部</div>
-                <div class="banana-tab" onclick="BananaTool.filter('generate', this)">绘图</div>
-                <div class="banana-tab" onclick="BananaTool.filter('edit', this)">生活</div>
-                <div class="banana-tab" onclick="BananaTool.filter('nsfw', this)">NSFW</div>
-                <div class="banana-tab" onclick="BananaTool.filter('study', this)">学习</div>
-                <div class="banana-tab" onclick="BananaTool.filter('work', this)">工作</div>
-            </div>
+             <div class="banana-search-wrapper">
+                 <svg class="banana-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                     <circle cx="11" cy="11" r="8"></circle>
+                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                 </svg>
+                 <input type="text" class="banana-search-input" placeholder="搜索关键词 (标题、提示词、分类)..." oninput="BananaTool.handleSearch(this.value)">
+             </div>
+
+             <div id="banana-source-tabs" class="banana-source-tabs">
+                 <div class="banana-source-tab active" data-source-id="banana_online">banana-prompt-quicker</div>
+                 <div class="banana-source-tab" data-source-id="local_prompts_json">OpenNana</div>
+                 <div class="banana-source-tab" data-source-id="local_prompts2_md">YouMind</div>
+             </div>
+
+              <div id="banana-category-tabs" class="banana-tabs"></div>
             <div id="banana-loading" style="text-align:center; padding:40px; color:#666;">
                 <div class="loading-spinner" style="margin:0 auto 10px auto;"></div>
-                正在获取最新提示词...
+                正在加载提示词...
             </div>
-            <div id="banana-error" style="text-align:center; padding:40px; color:#d93025; display:none;">
-                获取失败，请检查网络连接
-                <br><button class="config-btn" onclick="BananaTool.fetchData()" style="margin-top:10px; width:auto; padding:6px 20px;">重试</button>
-            </div>
+             <div id="banana-error" style="text-align:center; padding:40px; color:#d93025; display:none;">
+                 加载失败，请稍后重试
+                <br><button class="config-btn" onclick="BananaTool.fetchData({forceReload:true})" style="margin-top:10px; width:auto; padding:6px 20px;">重试</button>
+             </div>
             <div id="banana-grid" class="banana-grid"></div>
         </div>
     </div>

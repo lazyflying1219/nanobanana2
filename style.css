@@ -1415,9 +1415,14 @@
 
         /* 设置侧边栏 */
         .settings-sidebar {
-            width: 320px; background-color: white; border-left: 1px solid var(--border-color); display: block; height: 100%; overflow-y: auto; flex-shrink: 0;
-            position: relative; z-index: 40; transition: transform 0.3s ease;
+            width: 320px; background-color: white; border-left: 1px solid var(--border-color);
+            height: 100%; overflow-y: auto;
+            position: fixed; right: 0; top: 0; bottom: 0;
+            transform: translateX(100%);
+            box-shadow: -5px 0 15px rgba(0,0,0,0.1);
+            z-index: 2600; transition: transform 0.3s ease;
         }
+        .settings-sidebar.open { transform: translateX(0); }
         .settings-inner { padding: 24px; display: flex; flex-direction: column; min-height: 100%; }
         .config-label { font-size: 13px; color: #5f6368; margin-bottom: 10px; display: block; font-weight: 600; letter-spacing: 0.5px; }
         .provider-collapse { border: 1px solid #dadce0; border-radius: 8px; margin-bottom: 16px; overflow: hidden; flex-shrink: 0; }
@@ -1479,12 +1484,14 @@
         .tool-btn.slice-btn:hover { background: #fce8e6; border-color: #d93025; }
 
         /* Lightbox & Overlay */
-        .lightbox-overlay { display: none; position: fixed; z-index: 4000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); justify-content: center; align-items: center; }
-        .lightbox-overlay.active { display: flex; animation: fadeIn 0.2s; }
-        .lightbox-img { max-width: 95vw; max-height: 95vh; object-fit: contain; border-radius: 4px; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+        .lightbox-overlay { display: none; position: fixed; z-index: 4000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); justify-content: center; align-items: center; overflow: hidden; }
+        .lightbox-overlay.active { display: flex; animation: fadeIn 0.2s; touch-action: none; }
+        .lightbox-img { max-width: 95vw; max-height: 95vh; object-fit: contain; border-radius: 4px; box-shadow: 0 0 20px rgba(0,0,0,0.5); transform: translate(0px,0px) scale(1); transform-origin: center center; will-change: transform; cursor: zoom-in; user-select: none; -webkit-user-drag: none; touch-action: none; }
+        .lightbox-overlay.zoomed .lightbox-img { cursor: grab; }
+        .lightbox-overlay.zoomed .lightbox-img:active { cursor: grabbing; }
         .lightbox-close { position: absolute; top: 24px; right: 24px; color: white; font-size: 32px; cursor: pointer; opacity: 0.7; transition: opacity 0.2s; }
         
-        .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 30; display: none; backdrop-filter: blur(2px); }
+        .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 2590; display: none; backdrop-filter: blur(2px); }
         .overlay.active { display: block; }
         .loading-spinner { width: 20px; height: 20px; border: 2px solid #e0e0e0; border-top-color: var(--primary-color); border-radius: 50%; animation: spin 0.8s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
@@ -1503,6 +1510,7 @@
         .xhs-title-bar { font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 8px; color: #333; }
         .xhs-toggle-btn { padding: 8px; cursor: pointer; border-radius: 6px; transition: background 0.2s; }
         .xhs-toggle-btn:hover { background: #f1f3f4; }
+        .xhs-header-actions { position: absolute; right: 24px; display: flex; gap: 8px; align-items: center; }
 
         /* XHS Layout */
         .xhs-layout { flex: 1; display: flex; overflow: hidden; }
@@ -1868,10 +1876,10 @@
             transform: translateY(-4px); box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1); border-color: #fcd34d;
         }
         .banana-preview-box {
-            position: relative; aspect-ratio: 16/9; background: #f9fafb; overflow: hidden;
+            position: relative; aspect-ratio: 16/9; background: #f9fafb; overflow: hidden; cursor: zoom-in;
         }
         .banana-img {
-            width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s;
+            width: 100%; height: 100%; object-fit: cover; transition: transform 0.5s; cursor: zoom-in;
         }
         .banana-card:hover .banana-img { transform: scale(1.05); }
         .banana-tags {
@@ -1910,7 +1918,7 @@
             color: #94a3b8; cursor: pointer; transition: all 0.2s;
         }
         .banana-icon-btn:hover { background: #f1f5f9; color: #333; }
-        .banana-tabs { display: flex; gap: 10px; margin-bottom: 10px; justify-content: center; }
+        .banana-tabs { display: flex; gap: 10px; margin-bottom: 10px; justify-content: center; flex-wrap: wrap; max-width: 900px; margin-left: auto; margin-right: auto; }
         .banana-tab { padding: 6px 16px; border-radius: 20px; font-size: 13px; cursor: pointer; background: #f1f3f4; color: #5f6368; font-weight: 500; transition: all 0.2s; }
         .banana-tab.active { background: #fef3c7; color: #b45309; border: 1px solid #fcd34d; }
 
@@ -1920,6 +1928,37 @@
             max-width: 500px;
             margin: 0 auto 20px auto;
             width: 100%;
+        }
+        .banana-source-tabs {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            max-width: 650px;
+            margin: 0 auto 10px auto;
+            width: 100%;
+            flex-wrap: wrap;
+        }
+        .banana-source-tab {
+            padding: 7px 14px;
+            border-radius: 999px;
+            font-size: 12px;
+            cursor: pointer;
+            background: #fff;
+            color: #6b7280;
+            font-weight: 700;
+            border: 1px solid #e5e7eb;
+            transition: all 0.2s;
+            user-select: none;
+        }
+        .banana-source-tab:hover {
+            border-color: #fcd34d;
+            color: #b45309;
+        }
+        .banana-source-tab.active {
+            background: #fef3c7;
+            color: #b45309;
+            border: 1px solid #fcd34d;
+            box-shadow: 0 4px 14px rgba(245, 158, 11, 0.18);
         }
         .banana-search-input {
             width: 100%;
@@ -1943,6 +1982,22 @@
             transform: translateY(-50%);
             color: #9ca3af;
             pointer-events: none;
+        }
+
+        [data-theme="dark"] .banana-source-tab {
+            background: rgba(255,255,255,0.06);
+            border-color: rgba(255,255,255,0.16);
+            color: rgba(229,231,235,0.85);
+        }
+        [data-theme="dark"] .banana-source-tab:hover {
+            border-color: rgba(245, 158, 11, 0.45);
+            color: #fcd34d;
+        }
+        [data-theme="dark"] .banana-source-tab.active {
+            background: rgba(245, 158, 11, 0.22);
+            border-color: rgba(245, 158, 11, 0.55);
+            color: #fcd34d;
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
         }
 
         /* Toast 增强版 */

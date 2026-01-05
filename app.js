@@ -324,6 +324,10 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             }
 
             // 根据错误类型提供友好提示
+            if (/Bad control character in string literal in JSON/i.test(message)) {
+                this.show(`${context}失败`, '接口返回了非标准 JSON（包含未转义换行/控制字符），请尝试切换渠道/模型或关闭流式输出后重试');
+                return;
+            }
             if (message.includes('fetch') || message.includes('network')) {
                 this.show(`${context}失败`, '网络连接失败，请检查网络后重试');
             } else if (message.includes('401') || message.includes('403')) {
@@ -350,25 +354,482 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
        // === Banana Prompt Logic (修复版) ===
     const BananaTool = {
         modal: null, grid: null, loading: null, error: null,
-        allData: [], currentFilter: 'all', searchTerm: '',
+        sourceTabsEl: null, categoryTabsEl: null,
+        allData: [], searchTerm: '',
+        activeCategoryKey: 'all', showAllCategories: false, categoryStats: [], itemIndex: {},
+        activeSourceId: 'banana_online', loadedSourceId: '', cacheBySource: {}, requestSeq: 0,
         init() {
             this.modal = document.getElementById('banana-modal');
             this.grid = document.getElementById('banana-grid');
             this.loading = document.getElementById('banana-loading');
             this.error = document.getElementById('banana-error');
+            this.sourceTabsEl = document.getElementById('banana-source-tabs');
+            this.categoryTabsEl = document.getElementById('banana-category-tabs');
+
+            const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md']);
+            const savedSourceId = (localStorage.getItem('banana_source_id') || '').trim();
+            const preferredSourceId = supportedSourceIds.has(savedSourceId) ? savedSourceId : 'banana_online';
+
+            this.activeSourceId = supportedSourceIds.has(preferredSourceId) ? preferredSourceId : 'banana_online';
+            this.updateSourceTabsUI();
+            this.renderCategoryTabs();
+
+            if (this.sourceTabsEl && !this.sourceTabsEl.dataset.bound) {
+                this.sourceTabsEl.dataset.bound = 'true';
+                this.sourceTabsEl.addEventListener('click', (e) => {
+                    const tab = e.target.closest('.banana-source-tab');
+                    if (!tab || !this.sourceTabsEl.contains(tab)) return;
+                    this.changeSource(tab.dataset.sourceId);
+                });
+            }
+
+            if (this.categoryTabsEl && !this.categoryTabsEl.dataset.bound) {
+                this.categoryTabsEl.dataset.bound = 'true';
+                this.categoryTabsEl.addEventListener('click', (e) => {
+                    const tab = e.target.closest('.banana-tab');
+                    if (!tab || !this.categoryTabsEl.contains(tab)) return;
+                    const key = (tab.dataset.categoryKey || '').trim();
+                    if (!key) return;
+                    if (key === '__toggle__') {
+                        this.showAllCategories = !this.showAllCategories;
+                        this.renderCategoryTabs();
+                        return;
+                    }
+                    this.setCategory(key);
+                });
+            }
+
+            if (this.grid && !this.grid.dataset.bound) {
+                this.grid.dataset.bound = 'true';
+                this.grid.addEventListener('click', (e) => {
+                    const actionEl = e.target.closest('[data-banana-action]');
+                    if (!actionEl || !this.grid.contains(actionEl)) return;
+                    const action = (actionEl.dataset.bananaAction || '').trim();
+                    if (!action) return;
+
+                    const cardEl = actionEl.closest('.banana-card');
+                    if (!cardEl) return;
+                    const id = (cardEl.dataset.id || '').trim();
+                    const item = id && this.itemIndex ? this.itemIndex[id] : null;
+                    if (!item) return;
+
+                    if (action === 'copy') {
+                        this.copy(item.prompt);
+                        e.preventDefault();
+                    } else if (action === 'preview') {
+                        const imgEl = actionEl.tagName === 'IMG' ? actionEl : cardEl.querySelector('img.banana-img');
+                        const src = imgEl && imgEl.src ? imgEl.src : item.preview;
+                        if (src && typeof openLightbox === 'function') {
+                            openLightbox(src);
+                        } else if (src) {
+                            window.open(src, '_blank', 'noopener');
+                        } else {
+                            showToast('暂无可预览图片', 'warning');
+                        }
+                        e.preventDefault();
+                    } else if (action === 'fill') {
+                        this.sendToInput(item.prompt, false);
+                        e.preventDefault();
+                    } else if (action === 'save') {
+                        this.saveToCustom(item.title, item.prompt);
+                        e.preventDefault();
+                    }
+                });
+            }
+        },
+        normalizeCategoryKey(value) {
+            return this.normalizeText(value, '').toLowerCase().replace(/\s+/g, ' ').trim();
+        },
+        getCategoryLabel(key) {
+            const k = this.normalizeCategoryKey(key);
+            if (k === 'all') return '全部';
+            if (k === 'generate') return '生成';
+            if (k === 'edit') return '编辑';
+            const stat = Array.isArray(this.categoryStats) ? this.categoryStats.find(s => s && s.key === k) : null;
+            return stat && stat.label ? stat.label : (key || '');
+        },
+        updateSourceTabsUI() {
+            if (!this.sourceTabsEl) return;
+            const active = (this.activeSourceId || '').trim();
+            this.sourceTabsEl.querySelectorAll('.banana-source-tab').forEach(tab => {
+                const id = (tab.dataset.sourceId || '').trim();
+                tab.classList.toggle('active', id === active);
+            });
+        },
+        setCategory(key) {
+            const normalized = this.normalizeCategoryKey(key || 'all') || 'all';
+            this.activeCategoryKey = normalized;
+            this.renderCategoryTabs();
+            this.render();
+        },
+        renderCategoryTabs() {
+            if (!this.categoryTabsEl) return;
+            const MAX_VISIBLE = 14;
+            const stats = Array.isArray(this.categoryStats) ? this.categoryStats : [];
+            const active = this.activeCategoryKey || 'all';
+
+            const allTab = { key: 'all', label: '全部', count: Array.isArray(this.allData) ? this.allData.length : 0 };
+            const list = stats.filter(s => s && s.key && !['all', 'generate', 'edit'].includes(s.key));
+            const shouldToggle = list.length > MAX_VISIBLE;
+
+            let visible = list;
+            if (shouldToggle && !this.showAllCategories) {
+                visible = list.slice(0, MAX_VISIBLE);
+                if (active !== 'all' && !visible.some(s => s.key === active)) {
+                    const activeStat = list.find(s => s.key === active);
+                    if (activeStat) {
+                        visible = visible.slice(0, Math.max(0, MAX_VISIBLE - 1)).concat([activeStat]);
+                    }
+                }
+            }
+
+            this.categoryTabsEl.innerHTML = '';
+            const frag = document.createDocumentFragment();
+
+            const makeTab = (key, label, isActive) => {
+                const el = document.createElement('div');
+                el.className = 'banana-tab' + (isActive ? ' active' : '');
+                el.dataset.categoryKey = key;
+                el.textContent = label;
+                return el;
+            };
+
+            frag.appendChild(makeTab(allTab.key, allTab.label, active === 'all'));
+            frag.appendChild(makeTab('generate', 'GENERATE', active === 'generate'));
+            frag.appendChild(makeTab('edit', 'EDIT', active === 'edit'));
+
+            visible.forEach(stat => {
+                const label = stat.label || this.getCategoryLabel(stat.key);
+                frag.appendChild(makeTab(stat.key, label, stat.key === active));
+            });
+
+            if (shouldToggle) {
+                frag.appendChild(makeTab('__toggle__', this.showAllCategories ? '收起' : '更多', false));
+            }
+
+            this.categoryTabsEl.appendChild(frag);
+        },
+        prepareItems(data = [], sourceId = '') {
+            const rawItems = Array.isArray(data) ? data : [];
+            const placeholder = this.getPlaceholderPreview();
+            const normalizedSource = this.normalizeText(sourceId, 'banana');
+            const usedIds = new Set();
+
+            return rawItems.map((rawItem, idx) => {
+                const it = (rawItem && typeof rawItem === 'object') ? rawItem : {};
+                let id = this.normalizeText(it.id, `${normalizedSource}_${idx + 1}`);
+                if (usedIds.has(id)) id = `${id}_${idx + 1}`;
+                usedIds.add(id);
+
+                const title = this.normalizeText(it.title, `未命名-${idx + 1}`);
+                const prompt = this.normalizeText(it.prompt, '');
+                const category = this.normalizeText(it.category, '其他');
+                const subCategory = this.normalizeText(it.sub_category, '');
+                const mode = this.normalizeText(it.mode, 'generate');
+                const preview = this.normalizeText(it.preview, '') || placeholder;
+                const author = this.normalizeText(it.author, '');
+                const link = this.normalizeText(it.link, '');
+
+                const tags = Array.isArray(it.tags) ? it.tags
+                    .filter(t => typeof t === 'string')
+                    .map(t => t.trim())
+                    .filter(Boolean)
+                    : [];
+
+                const filterCandidates = normalizedSource === 'local_prompts_json'
+                    ? [...tags, mode]
+                    : [...tags, category, subCategory, mode].filter(Boolean);
+                const filterSet = new Set();
+                filterCandidates.forEach(label => {
+                    const key = this.normalizeCategoryKey(label);
+                    if (!key || key === 'all') return;
+                    if (key.includes('nsfw')) return;
+                    filterSet.add(key);
+                });
+
+                const searchText = [title, prompt, category, subCategory, tags.join(' ')]
+                    .filter(Boolean)
+                    .join('\n')
+                    .toLowerCase();
+
+                return {
+                    ...it,
+                    id,
+                    title,
+                    prompt,
+                    category,
+                    sub_category: subCategory,
+                    mode,
+                    preview,
+                    author,
+                    link,
+                    tags,
+                    filterTags: Array.from(filterSet),
+                    __searchText: searchText,
+                    __bananaPrepared: true
+                };
+            });
+        },
+        getOpenNanaCategoryLabel(key, fallbackLabel = '') {
+            const k = this.normalizeCategoryKey(key);
+            const map = {
+                'photography': '摄影',
+                'nature': '自然',
+                'landscape': '风景',
+                'portrait': '人像',
+                'vehicle': '交通工具',
+                'character': '角色',
+                'minimalist': '极简',
+                'fashion': '时尚',
+                'logo': '标志',
+                'paper-craft': '纸艺',
+                'typography': '字体排版',
+                'illustration': '插画',
+                'interior': '室内',
+                'branding': '品牌',
+                'product': '产品',
+                'cartoon': '卡通',
+                '3d': '3D',
+                'retro': '复古',
+                'food': '美食',
+                'poster': '海报',
+                'architecture': '建筑',
+                'neon': '霓虹',
+                'toy': '玩具',
+                'creative': '创意',
+                'futuristic': '未来主义',
+                'animal': '动物',
+                'ui': '界面/UI',
+                'fantasy': '奇幻',
+                'pixel': '像素',
+                'sculpture': '雕塑',
+                'infographic': '信息图',
+                'sci-fi': '科幻',
+                'felt': '毛毡',
+                'gaming': '游戏',
+                'clay': '黏土',
+                'emoji': '表情符号',
+                'data-viz': '数据可视化'
+            };
+            const cn = map[k];
+            if (cn) return `${cn} (${k})`;
+            return fallbackLabel || key;
+        },
+        buildCategoryStats(items = [], sourceId = '') {
+            const list = Array.isArray(items) ? items : [];
+            const normalizedSource = this.normalizeText(sourceId, '') || this.activeSourceId;
+            const modeKeys = new Set();
+            list.forEach(item => {
+                const k = this.normalizeCategoryKey(item && item.mode ? item.mode : '');
+                if (k) modeKeys.add(k);
+            });
+            const includeMode = modeKeys.size > 1;
+
+            const statsMap = new Map();
+
+            list.forEach(item => {
+                const it = (item && typeof item === 'object') ? item : {};
+                const perItem = new Set();
+                const candidates = [];
+
+                if (Array.isArray(it.tags)) candidates.push(...it.tags);
+                if (it.category && normalizedSource !== 'local_prompts_json') candidates.push(it.category);
+                if (it.sub_category) candidates.push(it.sub_category);
+                if (includeMode && it.mode) candidates.push(it.mode);
+
+                candidates.forEach(label => {
+                    const raw = this.normalizeText(label, '');
+                    if (!raw) return;
+                    const key = this.normalizeCategoryKey(raw);
+                    if (!key || key === 'all') return;
+                    if (key.includes('nsfw')) return;
+                    if (perItem.has(key)) return;
+                    perItem.add(key);
+
+                    const labelForUi = key === 'generate'
+                        ? '生成'
+                        : key === 'edit'
+                            ? '编辑'
+                            : normalizedSource === 'local_prompts_json'
+                                ? this.getOpenNanaCategoryLabel(key, raw)
+                                : raw;
+                    const existing = statsMap.get(key);
+                    if (!existing) {
+                        statsMap.set(key, { key, label: labelForUi, count: 1 });
+                        return;
+                    }
+                    existing.count += 1;
+                    if (!existing.label && labelForUi) existing.label = labelForUi;
+                });
+            });
+
+            const stats = Array.from(statsMap.values());
+            stats.sort((a, b) => (b.count - a.count) || String(a.label).localeCompare(String(b.label), 'zh-Hans-CN'));
+            return stats;
+        },
+        setData(data, { sourceId } = {}) {
+            const normalizedSourceId = this.normalizeText(sourceId, '') || this.activeSourceId;
+            const prepared = Array.isArray(data) && data.length > 0 && data[0] && data[0].__bananaPrepared
+                ? data
+                : this.prepareItems(data, normalizedSourceId);
+
+            this.allData = prepared;
+            this.loadedSourceId = normalizedSourceId;
+
+            const index = Object.create(null);
+            prepared.forEach(item => {
+                if (item && item.id) index[item.id] = item;
+            });
+            this.itemIndex = index;
+
+            this.categoryStats = this.buildCategoryStats(prepared, normalizedSourceId);
+            const fixedKeys = new Set(['all', 'generate', 'edit']);
+            if (!fixedKeys.has(this.activeCategoryKey) && !this.categoryStats.some(s => s && s.key === this.activeCategoryKey)) {
+                this.activeCategoryKey = 'all';
+            }
+
+            this.renderCategoryTabs();
+            this.render();
         },
         open() {
             if(!this.modal) this.init();
             closeAllSidebars();
             this.modal.classList.add('active');
-            if(this.allData.length === 0) this.fetchData();
+            this.updateSourceTabsUI();
+            if(this.allData.length === 0 || this.loadedSourceId !== this.activeSourceId) this.fetchData();
         },
         close() { this.modal.classList.remove('active'); },
-        async fetchData() {
+        changeSource(sourceId) {
+            const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md']);
+            const nextSourceId = supportedSourceIds.has((sourceId || '').trim()) ? sourceId.trim() : 'banana_online';
+
+            if (nextSourceId === this.activeSourceId && this.loadedSourceId === nextSourceId) {
+                this.updateSourceTabsUI();
+                return;
+            }
+
+            this.activeSourceId = nextSourceId;
+            localStorage.setItem('banana_source_id', nextSourceId);
+            this.updateSourceTabsUI();
+
+            this.loadedSourceId = '';
+            this.allData = [];
+            this.itemIndex = {};
+            this.categoryStats = [];
+            this.activeCategoryKey = 'all';
+            this.showAllCategories = false;
+            this.searchTerm = '';
+            const input = this.modal ? this.modal.querySelector('.banana-search-input') : null;
+            if (input) input.value = '';
+            this.renderCategoryTabs();
+
+            this.fetchData();
+        },
+        async fetchData({ forceReload = false } = {}) {
+            const sourceId = (this.activeSourceId || 'banana_online').trim() || 'banana_online';
+            this.activeSourceId = sourceId;
+            this.updateSourceTabsUI();
+
+            if (forceReload) {
+                delete this.cacheBySource[sourceId];
+            }
+
+            if (!forceReload && this.cacheBySource[sourceId] && this.cacheBySource[sourceId].length > 0) {
+                this.loading.style.display = 'none';
+                this.error.style.display = 'none';
+                this.setData(this.cacheBySource[sourceId], { sourceId });
+                return;
+            }
+
+            const requestId = ++this.requestSeq;
             this.loading.style.display = 'block';
             this.error.style.display = 'none';
             this.grid.innerHTML = '';
-            
+
+            try {
+                let data = [];
+                if (this.activeSourceId === 'banana_online') {
+                    data = await this.loadBananaOnline();
+                } else if (this.activeSourceId === 'local_prompts_json') {
+                    data = await this.loadOpenNanaLocalJson();
+                } else if (this.activeSourceId === 'local_prompts2_md') {
+                    data = await this.loadYouMindLocalMarkdown();
+                } else {
+                    throw new Error(`未知提示词源：${this.activeSourceId}`);
+                }
+
+                if (requestId !== this.requestSeq) return;
+
+                if (!Array.isArray(data) || data.length === 0) {
+                    throw new Error('提示词数据为空或格式不正确');
+                }
+
+                const prepared = this.prepareItems(data, sourceId);
+                this.cacheBySource[sourceId] = prepared;
+                this.loading.style.display = 'none';
+                this.error.style.display = 'none';
+                this.setData(prepared, { sourceId });
+                showToast(`成功加载 ${prepared.length} 个提示词`, 'success');
+
+            } catch (e) {
+                if (requestId !== this.requestSeq) return;
+                console.error('加载提示词失败:', e);
+                this.loading.style.display = 'none';
+                this.error.style.display = 'block';
+                const friendlyMessage = this.formatLoadError(e);
+                this.setErrorText(friendlyMessage);
+                ErrorHandler.show('加载提示词失败', friendlyMessage);
+            }
+        },
+        setErrorText(text) {
+            if (!this.error) return;
+            const nodes = Array.from(this.error.childNodes || []);
+            const textNode = nodes.find(n => n && n.nodeType === 3);
+            if (textNode) textNode.textContent = text;
+        },
+        formatLoadError(error) {
+            const raw = error && error.message ? String(error.message) : '';
+            const sourceId = this.activeSourceId;
+
+            if (sourceId === 'local_prompts_json' || sourceId === 'local_prompts2_md') {
+                if (typeof location !== 'undefined' && location.protocol === 'file:') {
+                    return '当前通过本地文件方式打开，浏览器限制导致无法加载本地提示词库，请通过本地服务器访问。';
+                }
+                if (raw.includes('404')) {
+                    return '未找到本地提示词数据，请确认已放在同级目录并通过本地服务器访问。';
+                }
+                if (raw.toLowerCase().includes('json') && (raw.includes('格式') || raw.includes('parse'))) {
+                    return '本地提示词数据格式不正确，请检查文件是否完整。';
+                }
+                if (raw.includes('Failed to fetch') || raw.includes('fetch')) {
+                    return '本地提示词数据加载失败，请检查本地服务是否正常。';
+                }
+                return '本地提示词数据加载失败，请检查文件与本地服务。';
+            }
+
+            return raw || '加载失败，请稍后重试';
+        },
+        getPlaceholderPreview() {
+            return 'https://placehold.co/600x400/e2e8f0/94a3b8?text=No+Preview';
+        },
+        normalizeText(value, fallback = '') {
+            if (value === null || value === undefined) return fallback;
+            const text = String(value).trim();
+            return text.length > 0 ? text : fallback;
+        },
+        buildAbsoluteUrl(path, baseUrl) {
+            const p = this.normalizeText(path, '');
+            if (!p) return '';
+            if (/^https?:\/\//i.test(p)) return p;
+            const base = this.normalizeText(baseUrl, '').replace(/\/+$/, '');
+            return `${base}/${p.replace(/^\/+/, '')}`;
+        },
+        sanitizeAuthor(author) {
+            const raw = this.normalizeText(author, '');
+            if (!raw) return '';
+            return raw.startsWith('@') ? raw.slice(1) : raw;
+        },
+        async loadBananaOnline() {
             const URLS = [
                 'https://raw.githubusercontent.com/glidea/banana-prompt-quicker/refs/heads/main/prompts.json',
                 'https://cdn.jsdelivr.net/gh/glidea/banana-prompt-quicker@main/prompts.json',
@@ -380,22 +841,33 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             for (let i = 0; i < URLS.length; i++) {
                 try {
                     const res = await nativeFetch(URLS[i], { timeout: 10000 });
-
-                    if(!res.ok) {
-                        throw new Error(`HTTP ${res.status}: 数据加载失败`);
-                    }
-
+                    if(!res.ok) throw new Error(`HTTP ${res.status}: 数据加载失败`);
                     const data = await res.json();
+                    if (!Array.isArray(data) || data.length === 0) throw new Error('数据格式错误或为空');
 
-                    if (!Array.isArray(data) || data.length === 0) {
-                        throw new Error('数据格式错误或为空');
-                    }
+                    const safeData = data.filter(item => {
+                        const normalized = (item && typeof item === 'object') ? item : {};
+                        const category = this.normalizeText(normalized.category, '').toLowerCase();
+                        const subCategory = this.normalizeText(normalized.sub_category, '').toLowerCase();
+                        return !category.includes('nsfw') && !subCategory.includes('nsfw');
+                    });
+                    if (safeData.length === 0) throw new Error('数据加载失败（过滤后为空）');
 
-                    this.allData = data;
-                    this.loading.style.display = 'none';
-                    this.render();
-                    showToast(`成功加载 ${data.length} 个提示词`, 'success');
-                    return;
+                    return safeData.map((item, idx) => {
+                        const normalized = (item && typeof item === 'object') ? item : {};
+                        return {
+                            id: this.normalizeText(normalized.id, `banana_${idx + 1}`),
+                            title: this.normalizeText(normalized.title, `未命名-${idx + 1}`),
+                            prompt: this.normalizeText(normalized.prompt, ''),
+                            category: this.normalizeText(normalized.category, '其他'),
+                            mode: this.normalizeText(normalized.mode, 'generate'),
+                            preview: this.normalizeText(normalized.preview, this.getPlaceholderPreview()),
+                            author: this.normalizeText(normalized.author, ''),
+                            link: this.normalizeText(normalized.link, ''),
+                            sub_category: this.normalizeText(normalized.sub_category, ''),
+                            created: this.normalizeText(normalized.created, ''),
+                        };
+                    });
 
                 } catch(e) {
                     console.warn(`源 ${i + 1} 失败:`, URLS[i], e.message);
@@ -404,10 +876,156 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 }
             }
 
-            console.error('所有源均失败:', lastError);
-            this.loading.style.display = 'none';
-            this.error.style.display = 'block';
-            ErrorHandler.show('加载提示词失败', '所有数据源均不可用，请稍后重试');
+            throw lastError || new Error('所有在线源均不可用');
+        },
+        async loadOpenNanaLocalJson() {
+            if (typeof location !== 'undefined' && location.protocol === 'file:') {
+                throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
+            }
+            const res = await nativeFetch('./prompts.json');
+            if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
+            const json = await res.json();
+            if (!json || !Array.isArray(json.items)) throw new Error('本地提示词数据格式不正确：需要 { items: [] }');
+
+            const base = 'https://opennana.com/awesome-prompt-gallery/';
+            const placeholder = this.getPlaceholderPreview();
+
+            return json.items.map((item, idx) => {
+                const it = (item && typeof item === 'object') ? item : {};
+                const prompts = Array.isArray(it.prompts) ? it.prompts.filter(Boolean) : [];
+                const combinedPrompt = prompts.length > 0 ? prompts.join('\n\n---\n\n') : this.normalizeText(it.prompt, '');
+                const previewPath = this.normalizeText(it.coverImage, '') || (Array.isArray(it.images) && it.images.length ? it.images[0] : '');
+
+                return {
+                    id: this.normalizeText(it.id, it.slug ? `opennana_${it.slug}` : `opennana_${idx + 1}`),
+                    title: this.normalizeText(it.title, this.normalizeText(it.slug, `OpenNana-${idx + 1}`)),
+                    prompt: combinedPrompt,
+                    category: 'OpenNana',
+                    mode: 'generate',
+                    preview: this.buildAbsoluteUrl(previewPath, base) || placeholder,
+                    author: this.sanitizeAuthor(it.source && it.source.name ? it.source.name : ''),
+                    link: this.normalizeText(it.source && it.source.url ? it.source.url : '', ''),
+                    tags: Array.isArray(it.tags) ? it.tags : []
+                };
+            });
+        },
+        parseYouMindMarkdown(text) {
+            const placeholder = this.getPlaceholderPreview();
+            const lines = String(text || '').split(/\r?\n/);
+            const items = [];
+            const seen = new Set();
+
+            const titleReg = /^###\s+No\.\s*(\d+)\s*:\s*(.+?)\s*$/;
+            const isBadgeUrl = (url) => {
+                const u = this.normalizeText(url, '').toLowerCase();
+                return u.includes('img.shields.io/') || u.includes('awesome.re/badge');
+            };
+            const shouldUsePreview = (candidate, current) => {
+                const c = this.normalizeText(candidate, '');
+                if (!c) return false;
+                const cur = this.normalizeText(current, '');
+                if (!cur) return true;
+                return isBadgeUrl(cur) && !isBadgeUrl(c);
+            };
+            let i = 0;
+
+            while (i < lines.length) {
+                const header = lines[i].match(titleReg);
+                if (!header) { i++; continue; }
+
+                const number = header[1];
+                const fullTitle = this.normalizeText(header[2], `YouMind-${number}`);
+                let displayTitle = fullTitle;
+                let derivedCategory = 'YouMind';
+                const derivedTags = new Set();
+
+                const titleMatch = fullTitle.match(/^(.+?)\s*-\s*(.+)$/);
+                if (titleMatch) {
+                    derivedCategory = this.normalizeText(titleMatch[1], 'YouMind');
+                    displayTitle = this.normalizeText(titleMatch[2], fullTitle);
+                    derivedCategory
+                        .split(/\s*[/\\]\s*/)
+                        .map(part => part.trim())
+                        .filter(Boolean)
+                        .forEach(part => derivedTags.add(part));
+                }
+                let prompt = '';
+                let preview = '';
+                let author = '';
+                let link = '';
+                let lang = '';
+
+                i++;
+                while (i < lines.length && !titleReg.test(lines[i])) {
+                    const line = lines[i];
+
+                    const imgTag = line.match(/<img[^>]+src=["']([^"']+)["']/i);
+                    if (imgTag && shouldUsePreview(imgTag[1], preview)) preview = imgTag[1].trim();
+
+                    const mdImg = line.match(/!\[[^\]]*\]\(([^)]+)\)/);
+                    if (mdImg && /^https?:\/\//i.test(mdImg[1]) && !isBadgeUrl(mdImg[1]) && shouldUsePreview(mdImg[1], preview)) {
+                        preview = mdImg[1].trim();
+                    }
+
+                    const authorMatch = line.match(/-\s+\*\*作者:\*\*\s+\[([^\]]+)\]\(([^)]+)\)/);
+                    if (authorMatch) {
+                        author = authorMatch[1].trim();
+                        if (!link) link = authorMatch[2].trim();
+                    }
+
+                    const sourceMatch = line.match(/-\s+\*\*来源:\*\*\s+\[[^\]]+\]\(([^)]+)\)/);
+                    if (sourceMatch) link = sourceMatch[1].trim();
+
+                    const langMatch = line.match(/-\s+\*\*多语言:\*\*\s*([^\s]+)/);
+                    if (langMatch) lang = langMatch[1].trim();
+
+                    if (!prompt && /####\s+.*提示词/.test(line)) {
+                        i++;
+                        while (i < lines.length && !/^```/.test(lines[i])) i++;
+                        if (i < lines.length && /^```/.test(lines[i])) {
+                            i++;
+                            const buf = [];
+                            while (i < lines.length && !/^```/.test(lines[i])) {
+                                buf.push(lines[i]);
+                                i++;
+                            }
+                            prompt = buf.join('\n').trim();
+                        }
+                    }
+
+                    i++;
+                }
+
+                const finalPrompt = this.normalizeText(prompt, '');
+                const dedupeKey = `${fullTitle}\n${finalPrompt}`;
+                if (!seen.has(dedupeKey)) {
+                    seen.add(dedupeKey);
+                    items.push({
+                        id: `youmind_${number}_${items.length + 1}`,
+                        title: displayTitle,
+                        prompt: finalPrompt,
+                        category: derivedCategory,
+                        mode: 'generate',
+                        preview: isBadgeUrl(preview) ? placeholder : this.normalizeText(preview, placeholder),
+                        author: this.normalizeText(author, 'YouMind'),
+                        link: this.normalizeText(link, ''),
+                        tags: Array.from(derivedTags)
+                    });
+                }
+            }
+
+            return items;
+        },
+        async loadYouMindLocalMarkdown() {
+            if (typeof location !== 'undefined' && location.protocol === 'file:') {
+                throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
+            }
+            const res = await nativeFetch('./prompts2.md');
+            if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
+            const text = await res.text();
+            const items = this.parseYouMindMarkdown(text);
+            if (!items.length) throw new Error('未从本地提示词文档解析到提示词，请确认文件内容完整');
+            return items;
         },
         filter(type, btnEl) {
             this.currentFilter = type;
@@ -419,7 +1037,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             this.searchTerm = val.toLowerCase().trim();
             this.render();
         },
-        render() {
+        renderLegacy() {
             this.grid.innerHTML = '';
             const filtered = this.allData.filter(item => {
                 let tabMatch = true;
@@ -429,8 +1047,6 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     tabMatch = item.mode === 'generate';
                 } else if(this.currentFilter === 'edit') {
                     tabMatch = item.mode === 'edit';
-                } else if(this.currentFilter === 'nsfw') {
-                    tabMatch = (item.category || '').toLowerCase() === 'nsfw';
                 } else if(this.currentFilter === 'study') {
                     tabMatch = (item.category || '').toLowerCase() === '学习';
                 } else if(this.currentFilter === 'work') {
@@ -461,8 +1077,119 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 this.grid.appendChild(card);
             });
         },
-        copy(encodedText) {
-            const text = decodeURIComponent(encodedText);
+        render() {
+            if (!this.grid) return;
+            this.grid.innerHTML = '';
+
+            const items = Array.isArray(this.allData) ? this.allData : [];
+            const activeKey = this.activeCategoryKey || 'all';
+            const term = (this.searchTerm || '').trim().toLowerCase();
+
+            const filtered = items.filter(item => {
+                const it = (item && typeof item === 'object') ? item : {};
+
+                if (activeKey !== 'all') {
+                    const tags = Array.isArray(it.filterTags) ? it.filterTags : [];
+                    if (!tags.includes(activeKey)) return false;
+                }
+
+                if (!term) return true;
+
+                const hay = typeof it.__searchText === 'string' ? it.__searchText : '';
+                if (hay && hay.includes(term)) return true;
+
+                const fallback = [
+                    this.normalizeText(it.title, ''),
+                    this.normalizeText(it.prompt, ''),
+                    this.normalizeText(it.category, ''),
+                    this.normalizeText(it.sub_category, ''),
+                    Array.isArray(it.tags) ? it.tags.join(' ') : ''
+                ].join('\n').toLowerCase();
+                return fallback.includes(term);
+            });
+
+            if (filtered.length === 0) {
+                this.grid.innerHTML = `<div style="text-align:center; color:#999; grid-column:1/-1; padding:40px;"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin:0 auto 12px; display:block; opacity:0.5;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>未找到相关提示词</div>`;
+                return;
+            }
+
+            const placeholder = this.getPlaceholderPreview();
+            const frag = document.createDocumentFragment();
+
+            filtered.forEach(item => {
+                const it = (item && typeof item === 'object') ? item : {};
+                const card = document.createElement('div');
+                card.className = 'banana-card';
+                card.dataset.id = this.normalizeText(it.id, '');
+
+                const modeKey = this.normalizeCategoryKey(it.mode);
+                const modeTagClass = modeKey === 'edit' ? 'mode-edit' : 'mode-generate';
+
+                const title = escapeHtml(this.normalizeText(it.title, ''));
+                const prompt = escapeHtml(this.normalizeText(it.prompt, ''));
+                let categoryLabel = this.normalizeText(it.category, '');
+                if (this.activeSourceId === 'local_prompts_json') {
+                    const isModeFilter = activeKey === 'generate' || activeKey === 'edit';
+                    if (!isModeFilter && activeKey !== 'all') {
+                        categoryLabel = this.getOpenNanaCategoryLabel(activeKey, activeKey);
+                    } else if (Array.isArray(it.tags) && it.tags.length > 0) {
+                        categoryLabel = this.getOpenNanaCategoryLabel(it.tags[0], it.tags[0]);
+                    } else {
+                        categoryLabel = 'OpenNana';
+                    }
+                }
+                const category = escapeHtml(categoryLabel);
+                const mode = escapeHtml(this.normalizeText(it.mode, ''));
+                const preview = escapeHtml(this.normalizeText(it.preview, '') || placeholder);
+                const author = escapeHtml(this.normalizeText(it.author, 'Unknown').split('@')[0]);
+
+                const rawLink = this.normalizeText(it.link, '');
+                const safeLink = /^https?:\/\//i.test(rawLink) ? escapeHtml(rawLink) : '';
+                const linkHtml = safeLink
+                    ? `<a href="${safeLink}" target="_blank" rel="noopener noreferrer" class="banana-icon-btn" title="查看原链接"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></a>`
+                    : '';
+
+                card.innerHTML = `
+                    <div class="banana-preview-box" data-banana-action="preview" title="点击查看大图">
+                        <img src="${preview}" class="banana-img" loading="lazy" onerror="this.src='${placeholder}'" data-banana-action="preview">
+                        <div class="banana-tags">
+                            <span class="banana-tag">${category}</span>
+                            <span class="banana-tag ${modeTagClass}">${mode}</span>
+                        </div>
+                    </div>
+                    <div class="banana-content">
+                        <div class="banana-title">${title}</div>
+                        <div class="banana-prompt-box" data-banana-action="copy">
+                            <div class="banana-prompt-text">${prompt}</div>
+                            <div class="banana-prompt-tip"><span>点击复制</span></div>
+                        </div>
+                        <div class="banana-footer">
+                            <div class="banana-author"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg> ${author}</div>
+                            <div class="banana-actions">
+                                ${linkHtml}
+                                <div class="banana-icon-btn" title="填充到输入框" data-banana-action="fill" style="color:#1a73e8;"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></div>
+                                <div class="banana-icon-btn" title="保存到我的提示词" data-banana-action="save" style="color:#ea4335;"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></div>
+                                <div class="banana-icon-btn" title="复制提示词" data-banana-action="copy"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                frag.appendChild(card);
+            });
+
+            this.grid.appendChild(frag);
+        },
+        decodeMaybe(text) {
+            const raw = this.normalizeText(text, '');
+            if (!raw) return '';
+            if (/%[0-9A-Fa-f]{2}/.test(raw) && !/\\s/.test(raw)) {
+                try { return decodeURIComponent(raw); } catch { return raw; }
+            }
+            return raw;
+        },
+        copy(textOrEncoded) {
+            const text = this.decodeMaybe(textOrEncoded);
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(text).then(() => {
                     showToast('提示词已复制！');
@@ -492,7 +1219,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         },
         // 发送到对话框
         sendToInput(encodedText, shouldSend = false) {
-            const text = decodeURIComponent(encodedText);
+            const text = this.decodeMaybe(encodedText);
             const textarea = document.getElementById('user-input');
             if (textarea) {
                 textarea.value = text;
@@ -515,8 +1242,8 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         },
         // 保存到我的提示词
         saveToCustom(encodedTitle, encodedPrompt) {
-            const title = decodeURIComponent(encodedTitle);
-            const prompt = decodeURIComponent(encodedPrompt);
+            const title = this.decodeMaybe(encodedTitle);
+            const prompt = this.decodeMaybe(encodedPrompt);
 
             // 检查是否已存在
             if (!CustomPromptTool.allPrompts) {
@@ -542,7 +1269,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             });
 
             CustomPromptTool.savePrompts();
-            showToast('已保存到我的提示词 ✓', 'success', 2000);
+            showToast('已保存到我的提示词', 'success', 2000);
         }
     };
 
@@ -770,6 +1497,178 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         async clear() { await this.open(); return new Promise((resolve, reject) => { const tx = this.db.transaction(this.storeName, 'readwrite'); tx.objectStore(this.storeName).clear(); tx.oncomplete = () => resolve(); tx.onerror = (e) => reject(e); }); }
     };
 
+    function xhsStripCodeFences(text) {
+        const input = String(text ?? '');
+        return input.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+    }
+
+    function xhsExtractFirstJsonObject(text) {
+        const input = xhsStripCodeFences(text);
+        const start = input.indexOf('{');
+        if (start === -1) return input.trim();
+
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+
+        for (let i = start; i < input.length; i++) {
+            const ch = input[i];
+            if (inString) {
+                if (escape) {
+                    escape = false;
+                    continue;
+                }
+                if (ch === '\\') {
+                    escape = true;
+                    continue;
+                }
+                if (ch === '"') {
+                    inString = false;
+                    continue;
+                }
+                continue;
+            }
+
+            if (ch === '"') {
+                inString = true;
+                continue;
+            }
+            if (ch === '{') depth += 1;
+            if (ch === '}') {
+                depth -= 1;
+                if (depth === 0) return input.slice(start, i + 1).trim();
+            }
+        }
+
+        return input.slice(start).trim();
+    }
+
+    function xhsEscapeControlCharsInJsonStrings(jsonText) {
+        const input = String(jsonText ?? '');
+        let out = '';
+        let inString = false;
+        let escape = false;
+
+        for (let i = 0; i < input.length; i++) {
+            const ch = input[i];
+            if (!inString) {
+                out += ch;
+                if (ch === '"') inString = true;
+                continue;
+            }
+
+            if (escape) {
+                escape = false;
+                out += ch;
+                continue;
+            }
+
+            if (ch === '\\') {
+                escape = true;
+                out += ch;
+                continue;
+            }
+
+            if (ch === '"') {
+                inString = false;
+                out += ch;
+                continue;
+            }
+
+            if (ch === '\n') { out += '\\n'; continue; }
+            if (ch === '\r') { out += '\\r'; continue; }
+            if (ch === '\t') { out += '\\t'; continue; }
+
+            const code = ch.charCodeAt(0);
+            if (code >= 0 && code < 0x20) {
+                out += `\\u${code.toString(16).padStart(4, '0')}`;
+                continue;
+            }
+
+            out += ch;
+        }
+
+        return out;
+    }
+
+    function xhsParseJsonLenient(rawText) {
+        const jsonCandidate = xhsExtractFirstJsonObject(rawText);
+        if (!jsonCandidate) throw new Error('模型未返回可解析的 JSON');
+
+        try {
+            return JSON.parse(jsonCandidate);
+        } catch (err) {
+            const repaired = xhsEscapeControlCharsInJsonStrings(jsonCandidate);
+            return JSON.parse(repaired);
+        }
+    }
+
+    function xhsSafeJsonParse(text) {
+        const raw = String(text ?? '').trim();
+        if (!raw) throw new Error('API 响应为空');
+
+        try {
+            return JSON.parse(raw);
+        } catch (err) {
+            const repaired = xhsEscapeControlCharsInJsonStrings(raw);
+            return JSON.parse(repaired);
+        }
+    }
+
+    function xhsTryParseOpenAISse(text) {
+        const raw = String(text ?? '');
+        if (!raw.includes('data:')) return null;
+
+        const lines = raw.split(/\r?\n/);
+        let fullContent = '';
+        let lastObj = null;
+
+        for (const line of lines) {
+            const match = line.match(/^data:\s*(.*)$/);
+            if (!match) continue;
+
+            const payload = (match[1] || '').trim();
+            if (!payload || payload === '[DONE]') continue;
+
+            let obj = null;
+            try {
+                obj = xhsSafeJsonParse(payload);
+            } catch (_) {
+                continue;
+            }
+
+            lastObj = obj;
+            const delta = obj?.choices?.[0]?.delta?.content;
+            if (typeof delta === 'string' && delta) {
+                fullContent += delta;
+            }
+
+            const msg = obj?.choices?.[0]?.message?.content;
+            if (!fullContent && typeof msg === 'string' && msg) {
+                fullContent = msg;
+            }
+        }
+
+        if (fullContent) {
+            return { choices: [{ message: { content: fullContent } }] };
+        }
+
+        return lastObj;
+    }
+
+    async function xhsReadJsonResponse(res, options = {}) {
+        const allowSse = !!options.allowSse;
+        const text = await res.text().catch(() => '');
+        if (!text) throw new Error('API 响应为空');
+
+        if (allowSse) {
+            const sseObj = xhsTryParseOpenAISse(text);
+            if (sseObj) return sseObj;
+        }
+
+        return xhsSafeJsonParse(text);
+    }
+
     // --- XHS Creator Logic (V7 Enhanced) ---
     const XHSCreator = {
         modal: null, topicInput: null, refImages: [], outlineData: null, isHistoryLoad: false,
@@ -786,6 +1685,18 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             this.modal.classList.add('active');
             this.loadTextSettings();
             this.renderHistory();
+            try {
+                if (!sessionStorage.getItem('xhs_guide_shown')) {
+                    sessionStorage.setItem('xhs_guide_shown', '1');
+                    const sidebar = document.getElementById('xhs-sidebar');
+                    if (sidebar && sidebar.classList.contains('collapsed')) {
+                        toggleXHSSidebar();
+                    }
+                    setTimeout(() => {
+                        showToast('提示：左上角按钮可展开文案配置/历史；右上角齿轮可打开“API 渠道管理”', 'default', 4500);
+                    }, 200);
+                }
+            } catch (_) {}
         },
         close() { this.modal.classList.remove('active'); },
         
@@ -900,13 +1811,23 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             const topic = this.topicInput.value.trim();
             const imgCount = document.getElementById('xhs-img-count').value || 4;
             
-            // 获取文案生成API配置
-            const host = document.getElementById('xhs-text-api-host').value.trim().replace(/\/+$/, '');
-            const key = document.getElementById('xhs-text-api-key').value.trim();
-            const model = document.getElementById('xhs-text-model').value.trim();
-            
-            if (!host || !key || !model) {
-                showToast('请先配置文案生成API', 'warning', 3000);
+            // 获取文案生成API配置：优先使用 XHS 独立配置；若未填写完整则回退到右侧「API 渠道」配置
+            const xhsHost = document.getElementById('xhs-text-api-host').value.trim().replace(/\/+$/, '');
+            const xhsKey = document.getElementById('xhs-text-api-key').value.trim();
+            const xhsModel = document.getElementById('xhs-text-model').value.trim();
+
+            const provider = ProviderManager && typeof ProviderManager.getConfig === 'function' ? ProviderManager.getConfig() : null;
+            const textConfig = (xhsHost && xhsKey && xhsModel)
+                ? { source: 'xhs', type: 'openai', host: xhsHost, key: xhsKey, model: xhsModel }
+                : (provider ? { source: 'provider', ...provider } : null);
+
+            if (!textConfig || !textConfig.host || !textConfig.key || !textConfig.model) {
+                showToast('请先配置文案生成 API（右侧“API 渠道管理”，或点左上角按钮展开本页左侧配置）', 'warning', 3800);
+                toggleSettings(true);
+                const xhsSidebar = document.getElementById('xhs-sidebar');
+                if (xhsSidebar && xhsSidebar.classList.contains('collapsed')) {
+                    toggleXHSSidebar();
+                }
                 return;
             }
             
@@ -933,15 +1854,15 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
 3. **匹配内容调性**：根据主题选择合适的表达风格（种草/教程/测评/OOTD/Vlog等）
 
 ## 输出规范
-返回严格的 **JSON格式**，结构如下：
+只输出严格的 **JSON格式**（不要任何解释、不要 Markdown、不要代码块），结构如下：
 
 {
   "title": "爆款标题（必须包含emoji，控制在20字内，使用数字/符号/反问/悬念等技巧）",
-  "content": "正文内容（分段清晰，每段加emoji，自然融入3-5个话题标签如#标签，语气亲切真实，避免广告感）",
+  "content": "正文内容（分段清晰，每段加emoji，自然融入3-5个话题标签如#标签，语气亲切真实，避免广告感；如需换行用\\n，不要直接换行）",
   "shots": [
     {
       "desc": "图1-封面图：简短描述图片用途和重点",
-      "prompt": "详细的画面描述（中文）：\n- 主体：具体描述主要元素、人物动作、产品特写等\n- 环境：场景氛围、背景元素、空间感\n- 色彩：主色调、配色方案（参考风格图）\n- 光影：光线方向、明暗对比、氛围营造\n- 风格：摄影风格、构图方式、视觉质感\n- 细节：重要的装饰元素、文字排版位置等\n\n要求：画面精致、符合小红书审美、适合${this.outlineData?.shots?.[0]?.refImage ? '参考图风格' : '当前主题'}"
+      "prompt": "详细的画面描述（中文）：\\n- 主体：具体描述主要元素、人物动作、产品特写等\\n- 环境：场景氛围、背景元素、空间感\\n- 色彩：主色调、配色方案（参考风格图）\\n- 光影：光线方向、明暗对比、氛围营造\\n- 风格：摄影风格、构图方式、视觉质感\\n- 细节：重要的装饰元素、文字排版位置等\\n\\n要求：画面精致、符合小红书审美、适合${this.outlineData?.shots?.[0]?.refImage ? '参考图风格' : '当前主题'}"
     }
   ]
 }
@@ -956,54 +1877,130 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
 - shots数组长度必须为 ${imgCount} 张
 - 所有prompt必须用中文描述，不要出现英文
 - 如果用户上传了参考图，必须在prompt中体现参考图的风格特征
-- 确保JSON格式完全正确，可以被直接解析`;
+- JSON 的字符串里不要出现真实换行符/Tab 等控制字符（需要换行请用\\n）
+- 确保 JSON 格式完全正确，可以被直接解析`;
 
             try {
-                // 使用 OpenAI 兼容格式
-                let contentPayload = [{ type: "text", text: systemPrompt + "\n\n需求：" + topic }];
-                this.refImages.forEach(imgObj => { 
-                    contentPayload.push({ 
-                        type: "image_url", 
-                        image_url: { url: imgObj.src } 
-                    }); 
-                });
-                
-                const requestBody = { 
-                    model: model, 
-                    stream: false, 
-                    messages: [{ 
-                        role: "user", 
-                        content: contentPayload 
-                    }] 
-                };
+                let data = null;
+                if (textConfig.type === 'openai') {
+                    // OpenAI 兼容格式
+                    let contentPayload = [{ type: "text", text: systemPrompt + "\n\n需求：" + topic }];
+                    this.refImages.forEach(imgObj => {
+                        contentPayload.push({
+                            type: "image_url",
+                            image_url: { url: imgObj.src }
+                        });
+                    });
 
-                const res = await nativeFetch(`${host}/v1/chat/completions`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${key}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(requestBody)
-                });
-                
-                if (!res.ok) {
-                    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                    const requestBody = {
+                        model: textConfig.model,
+                        stream: false,
+                        messages: [{
+                            role: "user",
+                            content: contentPayload
+                        }]
+                    };
+
+                    const res = await nativeFetch(`${textConfig.host.replace(/\/$/,'')}/v1/chat/completions`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${textConfig.key}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(requestBody)
+                    });
+
+                    if (!res.ok) {
+                        const errorText = await res.text().catch(() => '');
+                        throw new Error(`HTTP ${res.status}: ${errorText || res.statusText}`);
+                    }
+
+                    data = await xhsReadJsonResponse(res, { allowSse: true });
+                } else {
+                    // Gemini 原生格式
+                    const parts = [{ text: systemPrompt + "\n\n需求：" + topic }];
+                    this.refImages.forEach(imgObj => {
+                        const src = (imgObj && imgObj.src) ? String(imgObj.src) : '';
+                        if (!src) return;
+                        if (src.startsWith('data:image/')) {
+                            const base64 = src.split(',')[1];
+                            if (base64) {
+                                parts.push({ inline_data: { mime_type: 'image/jpeg', data: base64 } });
+                            }
+                            return;
+                        }
+                        // 对于 http(s) 图片，Gemini 端无法直接拉取，退化为只发文本（避免跨域/下载问题）
+                    });
+
+                    const payload = {
+                        contents: [{ role: "user", parts }],
+                        generationConfig: { responseModalities: ["TEXT"] }
+                    };
+
+                    const requestUrl = `${textConfig.host.replace(/\/$/,'')}/v1beta/models/${textConfig.model}:generateContent`;
+                    const res = await nativeFetch(requestUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'x-goog-api-key': textConfig.key
+                        },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!res.ok) {
+                        const errorText = await res.text().catch(() => '');
+                        throw new Error(`HTTP ${res.status}: ${errorText || res.statusText}`);
+                    }
+
+                    data = await xhsReadJsonResponse(res);
                 }
-                
-                const data = await res.json();
 
                 if (data.error) {
                     throw new Error(data.error.message || 'API返回错误');
                 }
 
-                if (!data.choices || !data.choices[0] || !data.choices[0].message) {
-                    throw new Error('API返回数据格式错误');
-                }
-
                 LoadingManager.updateText('正在解析方案...');
 
-                const cleanJson = data.choices[0].message.content.replace(/```json|```/g, '').trim();
-                this.outlineData = JSON.parse(cleanJson);
+                let rawText = '';
+                if (data.choices?.[0]?.message?.content) {
+                    rawText = data.choices[0].message.content;
+                } else if (data.candidates?.[0]?.content?.parts) {
+                    rawText = data.candidates[0].content.parts.map(p => p.text || '').join('');
+                }
+
+                let parsed;
+                if (rawText) {
+                    try {
+                        parsed = xhsParseJsonLenient(rawText);
+                    } catch (parseError) {
+                        const detail = parseError && parseError.message ? parseError.message : String(parseError || 'JSON解析失败');
+                        throw new Error(`模型返回的方案不是严格 JSON（已尝试自动修复仍失败）：${detail}`);
+                    }
+                } else if (data && typeof data === 'object' && Array.isArray(data.shots) && (typeof data.title === 'string' || typeof data.content === 'string')) {
+                    // 兼容部分渠道直接返回最终结构（无 OpenAI/Gemini 包装）
+                    parsed = data;
+                } else {
+                    throw new Error('API未返回文案内容');
+                }
+
+                if (!parsed || typeof parsed !== 'object') {
+                    throw new Error('模型返回内容不是 JSON 对象');
+                }
+                if (!Array.isArray(parsed.shots)) {
+                    throw new Error('模型返回的 shots 字段不是数组');
+                }
+
+                // 兼容模型把换行写成 "\\n" 的情况，统一还原为真实换行，避免渲染/生成 prompt 体验差
+                const normalizeText = (value) => (typeof value === 'string' ? value.replace(/\\n/g, '\n').replace(/\\r/g, '\r') : value);
+                parsed.title = normalizeText(parsed.title);
+                parsed.content = normalizeText(parsed.content);
+                parsed.shots = parsed.shots.map(s => ({
+                    ...s,
+                    desc: normalizeText(s?.desc),
+                    prompt: normalizeText(s?.prompt)
+                }));
+
+                this.outlineData = parsed;
                 this.outlineData.id = Date.now();
 
                 if(this.refImages.length > 0) {
@@ -1686,7 +2683,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
     async function sendMessage(){
         if(!currentSessionId)await createNewSession();
         const text=UI.textarea.value.trim(); const hasImgs=state.images.length>0; if(!text&&!hasImgs)return;
-        const config=ProviderManager.getConfig(); if(!config){alert("请先在右侧设置中添加 API 渠道");toggleSettings();return}
+        const config=ProviderManager.getConfig(); if(!config){alert("请先在右侧设置中添加 API 渠道");toggleSettings(true);return}
 
         // 清理可能残留的流式响应div
         const existingStreamDiv = document.getElementById('stream-text-content');
@@ -2291,12 +3288,159 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         } // 关闭 proceedWithDownload 函数
     }
     
-    function openLightbox(src){document.getElementById('lightbox-image').src=src;document.getElementById('lightbox').classList.add('active')}
-    function closeLightbox(){document.getElementById('lightbox').classList.remove('active');setTimeout(()=>document.getElementById('lightbox-image').src='',200)}
+    const LightboxController=(()=>{
+        let inited=false; let el=null; let img=null;
+        let scale=1; let tx=0; let ty=0;
+        const pointers=new Map(); let gesture=null;
+        const MIN_SCALE=1; const MAX_SCALE=6;
+
+        const isActive=()=>el&&el.classList.contains('active');
+        const clampScale=(s)=>Math.max(MIN_SCALE,Math.min(MAX_SCALE,s));
+        const apply=()=>{
+            if(!el||!img) return;
+            img.style.transform=`translate(${tx}px, ${ty}px) scale(${scale})`;
+            el.classList.toggle('zoomed',scale>1.01);
+            img.style.cursor=scale>1.01?'grab':'zoom-in';
+        };
+        const reset=()=>{scale=1; tx=0; ty=0; gesture=null; pointers.clear(); apply();};
+
+        const zoomTo=(nextScale,cx,cy)=>{
+            if(!img) return;
+            const oldRect=img.getBoundingClientRect();
+            if(!oldRect.width||!oldRect.height){
+                scale=clampScale(nextScale);
+                if(scale===1){tx=0; ty=0;}
+                apply();
+                return;
+            }
+            const relX=(cx-oldRect.left)/oldRect.width;
+            const relY=(cy-oldRect.top)/oldRect.height;
+            const prevScale=scale;
+            scale=clampScale(nextScale);
+            if(Math.abs(scale-prevScale)<0.001) return;
+
+            apply();
+
+            const newRect=img.getBoundingClientRect();
+            if(newRect.width&&newRect.height){
+                const targetLeft=cx-relX*newRect.width;
+                const targetTop=cy-relY*newRect.height;
+                tx+=targetLeft-newRect.left;
+                ty+=targetTop-newRect.top;
+            }
+            if(scale===1){tx=0; ty=0;}
+            apply();
+        };
+
+        const onWheel=(e)=>{
+            if(!isActive()) return;
+            e.preventDefault();
+            const factor=Math.exp(-(e.deltaY||0)*0.002);
+            zoomTo(scale*factor,e.clientX,e.clientY);
+        };
+
+        const updateFromPointers=()=>{
+            if(!isActive()) return;
+            if(pointers.size===1){
+                const p=Array.from(pointers.values())[0];
+                if(!gesture||gesture.type!=='pan'){gesture={type:'pan',lastX:p.x,lastY:p.y};return;}
+                const dx=p.x-gesture.lastX; const dy=p.y-gesture.lastY;
+                tx+=dx; ty+=dy;
+                gesture.lastX=p.x; gesture.lastY=p.y;
+                apply();
+                return;
+            }
+            if(pointers.size>=2){
+                const arr=Array.from(pointers.values());
+                const p1=arr[0]; const p2=arr[1];
+                const midX=(p1.x+p2.x)/2; const midY=(p1.y+p2.y)/2;
+                const dist=Math.hypot(p1.x-p2.x,p1.y-p2.y);
+                if(!gesture||gesture.type!=='pinch'){gesture={type:'pinch',lastDist:dist,lastMidX:midX,lastMidY:midY};return;}
+
+                const panDx=midX-gesture.lastMidX; const panDy=midY-gesture.lastMidY;
+                tx+=panDx; ty+=panDy;
+                gesture.lastMidX=midX; gesture.lastMidY=midY;
+
+                if(gesture.lastDist>0&&dist>0){
+                    const factor=dist/gesture.lastDist;
+                    gesture.lastDist=dist;
+                    zoomTo(scale*factor,midX,midY);
+                } else {
+                    gesture.lastDist=dist;
+                    apply();
+                }
+            }
+        };
+
+        const onPointerDown=(e)=>{
+            if(!isActive()||!img) return;
+            if(e.button!==undefined&&e.button!==0) return;
+            e.preventDefault();
+            img.setPointerCapture?.(e.pointerId);
+            pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+            img.style.cursor='grabbing';
+            gesture=null;
+            updateFromPointers();
+        };
+        const onPointerMove=(e)=>{
+            if(!isActive()) return;
+            if(!pointers.has(e.pointerId)) return;
+            e.preventDefault();
+            pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+            updateFromPointers();
+        };
+        const onPointerUp=(e)=>{
+            if(!isActive()) return;
+            pointers.delete(e.pointerId);
+            gesture=null;
+            if(pointers.size===0){ if(img) img.style.cursor=scale>1.01?'grab':'zoom-in'; return; }
+            updateFromPointers();
+        };
+        const onDblClick=(e)=>{
+            if(!isActive()) return;
+            e.preventDefault();
+            if(scale>1.01) reset();
+            else zoomTo(2,e.clientX,e.clientY);
+        };
+
+        const init=()=>{
+            if(inited) return;
+            el=document.getElementById('lightbox');
+            img=document.getElementById('lightbox-image');
+            if(!el||!img) return;
+            inited=true;
+            el.addEventListener('wheel',onWheel,{passive:false});
+            img.addEventListener('pointerdown',onPointerDown);
+            img.addEventListener('pointermove',onPointerMove);
+            img.addEventListener('pointerup',onPointerUp);
+            img.addEventListener('pointercancel',onPointerUp);
+            img.addEventListener('dblclick',onDblClick);
+        };
+
+        const open=(src)=>{
+            init();
+            if(!el||!img) return;
+            img.src=src||'';
+            el.classList.add('active');
+            reset();
+        };
+        const close=()=>{
+            if(!el||!img) return;
+            el.classList.remove('active');
+            el.classList.remove('zoomed');
+            reset();
+            setTimeout(()=>{if(img) img.src='';},200);
+        };
+        return {open,close};
+    })();
+
+    function openLightbox(src){LightboxController.open(src)}
+    function closeLightbox(){LightboxController.close()}
     const leftSidebar=document.getElementById('left-sidebar');const rightSidebar=document.getElementById('right-sidebar');const overlay=document.getElementById('overlay');
-    function toggleLeftSidebar(){leftSidebar.classList.toggle('open');overlay.classList.toggle('active');rightSidebar.classList.remove('open')}
-    function toggleSettings(){rightSidebar.classList.toggle('open');overlay.classList.toggle('active');leftSidebar.classList.remove('open')}
-    function closeAllSidebars(){leftSidebar.classList.remove('open');rightSidebar.classList.remove('open');overlay.classList.remove('active')}
+    function syncOverlay(){if(!overlay)return;const anyOpen=(leftSidebar&&leftSidebar.classList.contains('open'))||(rightSidebar&&rightSidebar.classList.contains('open'));overlay.classList.toggle('active',!!anyOpen)}
+    function toggleLeftSidebar(forceOpen){if(!leftSidebar)return;const next=typeof forceOpen==='boolean'?forceOpen:!leftSidebar.classList.contains('open');leftSidebar.classList.toggle('open',next);if(rightSidebar)rightSidebar.classList.remove('open');syncOverlay()}
+    function toggleSettings(forceOpen){if(!rightSidebar)return;const next=typeof forceOpen==='boolean'?forceOpen:!rightSidebar.classList.contains('open');rightSidebar.classList.toggle('open',next);if(leftSidebar)leftSidebar.classList.remove('open');syncOverlay()}
+    function closeAllSidebars(){if(leftSidebar)leftSidebar.classList.remove('open');if(rightSidebar)rightSidebar.classList.remove('open');if(overlay)overlay.classList.remove('active')}
     UI.textarea.addEventListener('input',function(){adjustTextareaHeight();checkInput()});
     UI.textarea.addEventListener('keydown',(e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});
     
