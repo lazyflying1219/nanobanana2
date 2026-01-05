@@ -225,6 +225,24 @@
                 </label>
             </div>
 
+            <label class="config-label">网络加速</label>
+            <div class="setting-card">
+                <label class="setting-toggle">
+                    <input type="checkbox" id="cf-proxy-toggle">
+                    <span>使用 Cloudflare 代理加载外部资源</span>
+                </label>
+                <div class="setting-hint">解决部分网络无法访问的提示词图片/在线源（部署到 Cloudflare Pages 后生效）</div>
+            </div>
+
+            <label class="config-label">同时生成图片数量</label>
+            <div class="count-selector" id="gen-count-selector">
+                <div class="count-btn active" data-val="1">1</div>
+                <div class="count-btn" data-val="2">2</div>
+                <div class="count-btn" data-val="3">3</div>
+                <div class="count-btn" data-val="4">4</div>
+            </div>
+            <div class="setting-hint" style="margin-top:10px; margin-bottom: 24px;">用于一次并发生成多张图；若开启 OpenAI 流式传输且数量 > 1，会自动关闭流式以避免冲突。</div>
+
             <label class="config-label">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;">
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
