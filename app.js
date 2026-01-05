@@ -989,10 +989,60 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
              if (typeof location !== 'undefined' && location.protocol === 'file:') {
                  throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
              }
-             const res = await nativeFetch('./youmind_prompts.json');
-             if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
-             const data = await res.json();
-             if (!Array.isArray(data)) throw new Error('本地提示词数据格式不正确：需要 JSON 数组');
+
+             const loadArrayFile = async (path) => {
+                 const res = await nativeFetch(path);
+                 if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
+                 const data = await res.json();
+                 if (!Array.isArray(data)) throw new Error('本地提示词数据格式不正确：需要 JSON 数组');
+                 return data;
+             };
+
+             let data = null;
+
+             // 优先支持“分片 + 清单”模式，解决 GitHub 单文件上传大小限制
+             try {
+                 const manifestRes = await nativeFetch('./youmind_prompts.manifest.json');
+                 if (manifestRes.ok) {
+                     const manifest = await manifestRes.json();
+                     if (Array.isArray(manifest) && manifest.length > 0) {
+                         const merged = [];
+                         for (const entry of manifest) {
+                             const name = String(entry || '').trim();
+                             if (!name) continue;
+                             const path = name.startsWith('./') ? name : `./${name}`;
+                             const part = await loadArrayFile(path);
+                             merged.push(...part);
+                         }
+                         data = merged;
+                     }
+                 }
+             } catch (_) {}
+
+             // 兼容：无清单但按 part1/part2... 命名的分片
+             if (!data || data.length === 0) {
+                 try {
+                     const merged = [];
+                     const MAX_PARTS = 20;
+                     for (let i = 1; i <= MAX_PARTS; i++) {
+                         const path = `./youmind_prompts.part${i}.json`;
+                         const res = await nativeFetch(path);
+                         if (!res.ok) {
+                             if (i === 1) break;
+                             break;
+                         }
+                         const part = await res.json();
+                         if (!Array.isArray(part)) throw new Error('分片数据格式不正确：需要 JSON 数组');
+                         merged.push(...part);
+                     }
+                     if (merged.length > 0) data = merged;
+                 } catch (_) {}
+             }
+
+             // 兼容：旧版单文件
+             if (!data || data.length === 0) {
+                 data = await loadArrayFile('./youmind_prompts.json');
+             }
 
              const safeData = data.filter(item => {
                  const normalized = (item && typeof item === 'object') ? item : {};
