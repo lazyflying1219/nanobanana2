@@ -3,6 +3,79 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
     // 保存原生 fetch，绕过扩展拦截（修复 ERR_SSL_PROTOCOL_ERROR）
     const nativeFetch = window.fetch.bind(window);
 
+    // Cloudflare 资源代理（部署到 Cloudflare Pages 后可用）：/proxy?url=...
+    const ProxyManager = {
+        enabled: false,
+        init() {
+            try {
+                const saved = localStorage.getItem('cf_proxy_enabled');
+                if (saved === 'true' || saved === 'false') {
+                    this.enabled = saved === 'true';
+                    return;
+                }
+
+                const host = (typeof location !== 'undefined' ? location.hostname : '').toLowerCase();
+                const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+                this.enabled = !isLocal && typeof location !== 'undefined' && (location.protocol === 'https:' || location.protocol === 'http:');
+            } catch (_) {
+                this.enabled = false;
+            }
+        },
+        setEnabled(next) {
+            this.enabled = !!next;
+            try { localStorage.setItem('cf_proxy_enabled', this.enabled ? 'true' : 'false'); } catch (_) {}
+        },
+        isEnabled() { return !!this.enabled; },
+        shouldProxy(url) {
+            if (!this.enabled) return false;
+            const raw = String(url || '').trim();
+            if (!raw) return false;
+            if (raw.startsWith('/proxy?') || raw.startsWith('./proxy?') || raw.startsWith('proxy?')) return false;
+            if (raw.startsWith('data:') || raw.startsWith('blob:')) return false;
+
+            try {
+                const u = new URL(raw, location.href);
+                if (u.origin === location.origin) return false;
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+                return true;
+            } catch (_) {
+                return false;
+            }
+        },
+        getProxiedUrl(url) {
+            if (!this.shouldProxy(url)) return url;
+            const u = new URL(String(url), location.href);
+            return `/proxy?url=${encodeURIComponent(u.href)}`;
+        },
+        async fetch(url, options) {
+            const finalUrl = this.getProxiedUrl(url);
+            if (finalUrl === url) return nativeFetch(url, options);
+
+            try {
+                const res = await nativeFetch(finalUrl, options);
+
+                // 本地/未部署 Functions 时：/proxy 可能不存在，直接回退直连
+                if (res.status === 404 || res.status === 405) {
+                    return nativeFetch(url, options);
+                }
+
+                // 代理失败时再尝试直连（有些场景直连可用，但代理被限制/上游异常）
+                if (!res.ok) {
+                    try {
+                        return await nativeFetch(url, options);
+                    } catch (_) {
+                        return res;
+                    }
+                }
+
+                return res;
+            } catch (_) {
+                return nativeFetch(url, options);
+            }
+        }
+    };
+    ProxyManager.init();
+
     // 文件系统管理器 - 自动保存图片到本地目录
     const FileSystemManager = {
         directoryHandle: null,
@@ -840,7 +913,8 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             let lastError = null;
             for (let i = 0; i < URLS.length; i++) {
                 try {
-                    const res = await nativeFetch(URLS[i], { timeout: 10000 });
+                    const fetcher = (ProxyManager && ProxyManager.isEnabled()) ? ProxyManager : null;
+                    const res = fetcher ? await fetcher.fetch(URLS[i], { timeout: 10000 }) : await nativeFetch(URLS[i], { timeout: 10000 });
                     if(!res.ok) throw new Error(`HTTP ${res.status}: 数据加载失败`);
                     const data = await res.json();
                     if (!Array.isArray(data) || data.length === 0) throw new Error('数据格式错误或为空');
@@ -1114,6 +1188,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             }
 
             const placeholder = this.getPlaceholderPreview();
+            const placeholderFinal = ProxyManager ? ProxyManager.getProxiedUrl(placeholder) : placeholder;
             const frag = document.createDocumentFragment();
 
             filtered.forEach(item => {
@@ -1140,7 +1215,10 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 }
                 const category = escapeHtml(categoryLabel);
                 const mode = escapeHtml(this.normalizeText(it.mode, ''));
-                const preview = escapeHtml(this.normalizeText(it.preview, '') || placeholder);
+                const rawPreview = this.normalizeText(it.preview, '') || placeholder;
+                const preview = escapeHtml(ProxyManager ? ProxyManager.getProxiedUrl(rawPreview) : rawPreview);
+                const rawPreviewEscaped = escapeHtml(rawPreview);
+                const placeholderEscaped = escapeHtml(placeholderFinal);
                 const author = escapeHtml(this.normalizeText(it.author, 'Unknown').split('@')[0]);
 
                 const rawLink = this.normalizeText(it.link, '');
@@ -1151,7 +1229,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
 
                 card.innerHTML = `
                     <div class="banana-preview-box" data-banana-action="preview" title="点击查看大图">
-                        <img src="${preview}" class="banana-img" loading="lazy" onerror="this.src='${placeholder}'" data-banana-action="preview">
+                        <img src="${preview}" class="banana-img" loading="lazy" data-raw-src="${rawPreviewEscaped}" data-placeholder-src="${placeholderEscaped}" onerror="handlePromptImageError(this)" data-banana-action="preview">
                         <div class="banana-tags">
                             <span class="banana-tag">${category}</span>
                             <span class="banana-tag ${modeTagClass}">${mode}</span>
@@ -2113,10 +2191,16 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             ProgressBar.setProgress(0);
             showToast(`开始批量生成 ${total} 张图片...`, 'info', 2000);
 
-            // 批量生成，带进度更新
-            const promises = this.outlineData.shots.map(async (_, i) => {
+            // 批量生成：按“同时生成图片数量”限制并发（1-4）
+            const limit = Math.min(4, Math.max(1, Number(state.concurrentImageCount || 1)));
+            let nextIndex = 0;
+
+            const runOne = async (i) => {
                 try {
                     await this.regenerateSingleImage(i);
+                } catch (e) {
+                    console.error(`Image ${i} generation failed:`, e);
+                } finally {
                     completed++;
                     const progress = (completed / total) * 100;
                     ProgressBar.setProgress(progress);
@@ -2124,7 +2208,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     if (completed === total) {
                         ProgressBar.hide();
                         showToast('所有图片生成完成！', 'success', 3000);
-                        
+
                         setTimeout(() => {
                             const rightPanel = document.querySelector('.xhs-right');
                             if (rightPanel) {
@@ -2132,23 +2216,25 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                             }
                         }, 500);
                     } else {
-    const firstGeneratedCard = document.querySelector('.shot-img[style*="opacity: 1"]')?.closest('.shot-card');
-    if (firstGeneratedCard && completed === 1) {
-        setTimeout(() => {
-            firstGeneratedCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }, 300);
-    }
-}
-                     
-                } catch (e) {
-                    completed++;
-                    const progress = (completed / total) * 100;
-                    ProgressBar.setProgress(progress);
-                    console.error(`Image ${i} generation failed:`, e);
+                        const firstGeneratedCard = document.querySelector('.shot-img[style*="opacity: 1"]')?.closest('.shot-card');
+                        if (firstGeneratedCard && completed === 1) {
+                            setTimeout(() => {
+                                firstGeneratedCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                            }, 300);
+                        }
+                    }
+                }
+            };
+
+            const workers = Array.from({ length: Math.min(limit, total) }, async () => {
+                while (true) {
+                    const i = nextIndex++;
+                    if (i >= total) break;
+                    await runOne(i);
                 }
             });
 
-            await Promise.all(promises);
+            await Promise.all(workers);
         },
         async downloadImage(index) { 
             const img = document.getElementById(`res-img-${index}`); 
@@ -2583,7 +2669,9 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
 
     const ProviderManager={providers:[],activeId:'random',init(){try{this.providers=JSON.parse(localStorage.getItem('gemini_providers')||'[]');this.activeId=localStorage.getItem('gemini_active_provider')||'random';const oldHost=localStorage.getItem('api-host');if(oldHost&&this.providers.length===0){this.providers.push({id:'legacy_'+Date.now(),name:'默认渠道',type:'gemini',host:oldHost,key:localStorage.getItem('api-key')||'',model:localStorage.getItem('model-name')||'gemini-3-pro-image-preview'});this.saveToStorage()}}catch(e){console.error(e);this.providers=[]}this.renderUI()},saveToStorage(){localStorage.setItem('gemini_providers',JSON.stringify(this.providers));localStorage.setItem('gemini_active_provider',this.activeId)},renderUI(){const select=document.getElementById('provider-select');select.innerHTML='<option value="random">🎲 随机优选 (自动轮询)</option>';this.providers.forEach(p=>{const opt=document.createElement('option');opt.value=p.id;opt.text=p.name;if(p.id===this.activeId)opt.selected=true;select.appendChild(opt)});if(this.activeId==='random')select.value='random';const list=document.getElementById('provider-list');list.innerHTML='';this.providers.forEach(p=>{const div=document.createElement('div');div.className='provider-item';const typeLabel=p.type==='openai'?'[OpenAI]':'[Gemini]';div.innerHTML=`<span>${escapeHtml(p.name)} <span style="color:#1a73e8;font-size:9px;">${typeLabel}</span></span> <span style="color:#999; font-size:10px;">${escapeHtml(p.model)}</span>`;div.onclick=()=>this.loadForm(p);list.appendChild(div)})},loadForm(provider){document.getElementById('p-id').value=provider.id;document.getElementById('p-name').value=provider.name;document.getElementById('p-type').value=provider.type||'gemini';document.getElementById('p-host').value=provider.host;document.getElementById('p-key').value=provider.key;document.getElementById('p-model').value=provider.model;const items=document.querySelectorAll('.provider-item');items.forEach(el=>{if(el.textContent.includes(provider.name))el.classList.add('selected');else el.classList.remove('selected')})},clearForm(){document.getElementById('p-id').value='';document.getElementById('p-name').value='';document.getElementById('p-type').value='gemini';document.getElementById('p-host').value='';document.getElementById('p-key').value='';document.getElementById('p-model').value='';document.querySelectorAll('.provider-item').forEach(el=>el.classList.remove('selected'))},save(){const id=document.getElementById('p-id').value;const name=document.getElementById('p-name').value.trim();const type=document.getElementById('p-type').value;const host=document.getElementById('p-host').value.trim();const key=document.getElementById('p-key').value.trim();const model=document.getElementById('p-model').value.trim();if(!name||!host||!key||!model){alert("所有字段必填");return}if(id){const idx=this.providers.findIndex(p=>p.id===id);if(idx>-1)this.providers[idx]={id,name,type,host,key,model}}else{this.providers.push({id:'p_'+Date.now(),name,type,host,key,model})}this.saveToStorage();this.renderUI();this.clearForm()},del(){const id=document.getElementById('p-id').value;if(!id)return;if(!confirm("确定删除该渠道?"))return;this.providers=this.providers.filter(p=>p.id!==id);if(this.activeId===id)this.activeId='random';this.saveToStorage();this.renderUI();this.clearForm()},select(val){this.activeId=val;localStorage.setItem('gemini_active_provider',val)},getConfig(){if(this.providers.length===0)return null;if(this.activeId==='random'||!this.providers.find(p=>p.id===this.activeId)){const idx=Math.floor(Math.random()*this.providers.length);return this.providers[idx]}else{return this.providers.find(p=>p.id===this.activeId)}}};
     
-    const DB_NAME='GeminiProDB';const DB_VERSION=2;let db=null;let currentSessionId=null;const activeGenerations=new Set();
+    const DB_NAME='GeminiProDB';const DB_VERSION=2;let db=null;let currentSessionId=null;const activeGenerations=new Set();const activeGenerationCounts=new Map();
+    function markGenerationStart(sessionId, count = 1){const sid=Number(sessionId)||sessionId;const cur=activeGenerationCounts.get(sid)||0;const next=Math.max(0,cur+Number(count||1));activeGenerationCounts.set(sid,next);activeGenerations.add(sid)}
+    function markGenerationEnd(sessionId){const sid=Number(sessionId)||sessionId;const cur=activeGenerationCounts.get(sid)||0;const next=cur-1;if(next<=0){activeGenerationCounts.delete(sid);activeGenerations.delete(sid)}else{activeGenerationCounts.set(sid,next)}}
     function initDB(){return new Promise((resolve,reject)=>{const request=indexedDB.open(DB_NAME,DB_VERSION);request.onupgradeneeded=(e)=>{const db=e.target.result;if(!db.objectStoreNames.contains('sessions'))db.createObjectStore('sessions',{keyPath:'id'});if(!db.objectStoreNames.contains('messages')){const msgStore=db.createObjectStore('messages',{keyPath:'id',autoIncrement:true});msgStore.createIndex('sessionId','sessionId',{unique:false})}};request.onsuccess=(e)=>{db=e.target.result;resolve(db)};request.onerror=(e)=>reject(e)})}
     async function getAllSessions(){return new Promise((resolve)=>{const tx=db.transaction('sessions','readonly');const req=tx.objectStore('sessions').getAll();req.onsuccess=()=>resolve(req.result.sort((a,b)=>b.id-a.id))})}
     async function getSessionMessages(sessionId){return new Promise((resolve)=>{const tx=db.transaction('messages','readonly');const index=tx.objectStore('messages').index('sessionId');const req=index.getAll(sessionId);req.onsuccess=()=>resolve(req.result)})}
@@ -2610,9 +2698,91 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
     // 页面加载时初始化主题
     initTheme();
     
-    const UI={chatHistory:document.getElementById('chat-history'),emptyState:document.getElementById('empty-state'),sessionList:document.getElementById('session-list'),textarea:document.getElementById('user-input'),fileInput:document.getElementById('file-input'),previewArea:document.getElementById('preview-area'),sendBtn:document.getElementById('send-btn')};const state={images:[],resolution:'4K',aspectRatio:'auto',useStreaming:false,useContext:false,contextCount:5};
+    const UI={chatHistory:document.getElementById('chat-history'),emptyState:document.getElementById('empty-state'),sessionList:document.getElementById('session-list'),textarea:document.getElementById('user-input'),fileInput:document.getElementById('file-input'),previewArea:document.getElementById('preview-area'),sendBtn:document.getElementById('send-btn')};const state={images:[],resolution:'4K',aspectRatio:'auto',useStreaming:false,useContext:false,contextCount:5,concurrentImageCount:1};
     
-    window.onload=async()=>{ProviderManager.init();XHSCreator.init();SlicerTool.init();BananaTool.init();CustomPromptTool.init();FileSystemManager.init();await initDB();await renderSessionList();const sessions=await getAllSessions();if(sessions.length>0)await loadSession(sessions[0].id);else await createNewSession();const streamToggle=document.getElementById('stream-toggle');if(streamToggle){streamToggle.checked=localStorage.getItem('use_streaming')==='true';state.useStreaming=streamToggle.checked;streamToggle.addEventListener('change',()=>{state.useStreaming=streamToggle.checked;localStorage.setItem('use_streaming',streamToggle.checked)})}const contextToggle=document.getElementById('context-toggle');const contextCount=document.getElementById('context-count');if(contextToggle&&contextCount){contextToggle.checked=localStorage.getItem('use_context')==='true';state.useContext=contextToggle.checked;state.contextCount=parseInt(localStorage.getItem('context_count')||'5');contextCount.value=state.contextCount;contextToggle.addEventListener('change',()=>{state.useContext=contextToggle.checked;localStorage.setItem('use_context',contextToggle.checked)});contextCount.addEventListener('change',()=>{state.contextCount=parseInt(contextCount.value);localStorage.setItem('context_count',contextCount.value)})}};
+    window.onload = async () => {
+        ProviderManager.init();
+        XHSCreator.init();
+        SlicerTool.init();
+        BananaTool.init();
+        CustomPromptTool.init();
+        FileSystemManager.init();
+
+        await initDB();
+        await renderSessionList();
+
+        const sessions = await getAllSessions();
+        if (sessions.length > 0) await loadSession(sessions[0].id);
+        else await createNewSession();
+
+        // 右侧设置：默认常驻（桌面端），再次点击可隐藏
+        try {
+            const saved = localStorage.getItem('settings_open');
+            const shouldOpen = saved === null ? true : saved === 'true';
+            if (typeof toggleSettings === 'function') {
+                toggleSettings(window.innerWidth > 768 ? shouldOpen : false);
+            }
+        } catch (_) {}
+
+        // Cloudflare 代理开关
+        const cfProxyToggle = document.getElementById('cf-proxy-toggle');
+        if (cfProxyToggle) {
+            cfProxyToggle.checked = ProxyManager && ProxyManager.isEnabled();
+            cfProxyToggle.addEventListener('change', () => {
+                ProxyManager && ProxyManager.setEnabled(cfProxyToggle.checked);
+                showToast(cfProxyToggle.checked ? '已开启 Cloudflare 代理' : '已关闭 Cloudflare 代理', 'success', 1800);
+                try { BananaTool.render(); } catch (_) {}
+            });
+        }
+
+        // 同时生成图片数量（1-4）
+        try {
+            const savedCount = parseInt(localStorage.getItem('concurrent_image_count') || '1', 10);
+            state.concurrentImageCount = [1, 2, 3, 4].includes(savedCount) ? savedCount : 1;
+        } catch (_) {
+            state.concurrentImageCount = 1;
+        }
+        document.querySelectorAll('#gen-count-selector .count-btn').forEach(btn => {
+            const val = parseInt(btn.dataset.val || '1', 10);
+            btn.classList.toggle('active', val === state.concurrentImageCount);
+            btn.addEventListener('click', () => {
+                const next = parseInt(btn.dataset.val || '1', 10);
+                state.concurrentImageCount = [1, 2, 3, 4].includes(next) ? next : 1;
+                try { localStorage.setItem('concurrent_image_count', String(state.concurrentImageCount)); } catch (_) {}
+                document.querySelectorAll('#gen-count-selector .count-btn').forEach(b => {
+                    const v = parseInt(b.dataset.val || '1', 10);
+                    b.classList.toggle('active', v === state.concurrentImageCount);
+                });
+            }, { passive: true });
+        });
+
+        const streamToggle = document.getElementById('stream-toggle');
+        if (streamToggle) {
+            streamToggle.checked = localStorage.getItem('use_streaming') === 'true';
+            state.useStreaming = streamToggle.checked;
+            streamToggle.addEventListener('change', () => {
+                state.useStreaming = streamToggle.checked;
+                localStorage.setItem('use_streaming', streamToggle.checked);
+            });
+        }
+
+        const contextToggle = document.getElementById('context-toggle');
+        const contextCount = document.getElementById('context-count');
+        if (contextToggle && contextCount) {
+            contextToggle.checked = localStorage.getItem('use_context') === 'true';
+            state.useContext = contextToggle.checked;
+            state.contextCount = parseInt(localStorage.getItem('context_count') || '5', 10);
+            contextCount.value = state.contextCount;
+            contextToggle.addEventListener('change', () => {
+                state.useContext = contextToggle.checked;
+                localStorage.setItem('use_context', contextToggle.checked);
+            });
+            contextCount.addEventListener('change', () => {
+                state.contextCount = parseInt(contextCount.value, 10);
+                localStorage.setItem('context_count', contextCount.value);
+            });
+        }
+    };
 
     function activateStickerMode(){createNewSession("表情包制作").then(()=>{const stickerPrompt="为我生成图中角色的绘制 Q 版的，LINE 风格的半身像表情包，注意头饰要正确\n彩色手绘风格，使用 4x6 布局，涵盖各种各样的常用聊天语句，或是一些有关的娱乐 meme\n其他需求：不要原图复制。所有标注为手写简体中文。";UI.textarea.value=stickerPrompt;state.resolution='4K';document.querySelectorAll('.res-btn').forEach(b=>b.classList.remove('active'));document.querySelector('.res-btn[data-val="4K"]').classList.add('active');state.aspectRatio='16:9';document.querySelectorAll('.ratio-card').forEach(c=>c.classList.remove('active'));document.querySelector('.ratio-card[data-val="16:9"]').classList.add('active');alert("已进入表情包模式！\n请点击输入框左侧图标上传一张角色参考图，然后点击发送。");adjustTextareaHeight();checkInput();if(window.innerWidth<=768)closeAllSidebars()})}
     
@@ -2699,26 +2869,60 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         appendMessageToUI('user', userHtml, currentText, currentImagesBase64, userMsgId);
         const msgs = await getSessionMessages(thisSessionId); if(msgs.length<=1 && currentText){ const newTitle = currentText.substring(0, 20) + (currentText.length>20?'...':''); updateSessionTitle(thisSessionId, newTitle); renderSessionList(); }
 
-        // 创建带进度条的 loading 消息
-        let loadingDiv=null;
-        const progressId = 'progress-' + Date.now();
-        if(thisSessionId===currentSessionId){
-            const loadingHtml = SmartProgressBar.createHTML(progressId);
-            loadingDiv = appendMessageToUI('bot', loadingHtml);
+         const batchCount = Math.min(4, Math.max(1, Number(state.concurrentImageCount || 1)));
+         const useStreamingForThis = !!state.useStreaming && batchCount === 1;
+         if (state.useStreaming && batchCount > 1) {
+             showToast('多图并发已自动关闭流式传输', 'warning', 2500);
+         }
 
-            // 启动智能进度条
-            const hasRefImages = currentImagesBase64.length > 0;
-            SmartProgressBar.start(progressId, state.resolution, hasRefImages);
+         // 为每张图创建独立的 loading 消息（便于并发）
+         const loadingDivs = [];
+         const progressIds = [];
+         const baseTs = Date.now();
+
+         for (let i = 0; i < batchCount; i++) {
+             const progressId = `progress-${baseTs}-${i + 1}`;
+             progressIds.push(progressId);
+
+             let loadingDiv = null;
+             if (thisSessionId === currentSessionId) {
+                 const badge = batchCount > 1
+                     ? `<div style="margin: 0 0 6px 20px; font-size: 12px; color: #5f6368;">并发生成 ${i + 1}/${batchCount}</div>`
+                     : '';
+                 const loadingHtml = badge + SmartProgressBar.createHTML(progressId);
+                 loadingDiv = appendMessageToUI('bot', loadingHtml);
+
+                 const hasRefImages = currentImagesBase64.length > 0;
+                 SmartProgressBar.start(progressId, state.resolution, hasRefImages);
+             }
+             loadingDivs.push(loadingDiv);
+         }
+
+         markGenerationStart(thisSessionId, batchCount);
+         renderSessionList();
+
+         for (let i = 0; i < batchCount; i++) {
+             processGeneration(config, currentText, currentImagesBase64, loadingDivs[i], thisSessionId, progressIds[i], { useStreaming: useStreamingForThis, batchIndex: i + 1, batchTotal: batchCount });
+         }
+     }
+
+    async function urlToRef(url) {
+        try {
+            const finalUrl = ProxyManager ? ProxyManager.getProxiedUrl(url) : url;
+            const response = await nativeFetch(finalUrl);
+            const blob = await response.blob();
+            const reader = new FileReader();
+            reader.onloadend = () => { useAsReference(reader.result); };
+            reader.readAsDataURL(blob);
+        } catch (e) {
+            alert("获取远程图片失败（可能是跨域限制或网络屏蔽）。\n建议：部署到 Cloudflare Pages 并开启“Cloudflare 代理加载外部资源”。");
         }
-
-        activeGenerations.add(thisSessionId);
-        renderSessionList();
-        processGeneration(config, currentText, currentImagesBase64, loadingDiv, thisSessionId, progressId);
     }
 
-    async function urlToRef(url) { try { const response = await nativeFetch(url); const blob = await response.blob(); const reader = new FileReader(); reader.onloadend = () => { useAsReference(reader.result); }; reader.readAsDataURL(blob); } catch (e) { alert("获取远程图片失败（可能是跨域限制）。\n请点击下载按钮保存图片，然后手动上传。"); } }
-
-    async function processGeneration(config,text,imagesBase64,loadingDiv,sessionId,progressId){
+    async function processGeneration(config,text,imagesBase64,loadingDiv,sessionId,progressId,options={}){
+        const useStreaming = typeof options.useStreaming === 'boolean' ? options.useStreaming : state.useStreaming;
+        let ended = false;
+        const endOnce = () => { if (ended) return; ended = true; markGenerationEnd(sessionId); renderSessionList(); };
         try{
             let data;
             if (config.type === 'openai') {
@@ -2781,7 +2985,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 const payload = {
                     model: config.model,
                     messages: messages,
-                    stream: state.useStreaming,
+                    stream: useStreaming,
                     size: size,
                     aspect_ratio: state.aspectRatio !== 'auto' ? state.aspectRatio : undefined
                 };
@@ -2803,19 +3007,17 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 
                 if (!res.ok) {
                     const errorData = await res.json();
-                    activeGenerations.delete(sessionId);
-                    renderSessionList();
+                    endOnce();
                     throw new Error(JSON.stringify(errorData));
                 }
                 
-                if (state.useStreaming) {
+                if (useStreaming) {
                     data = await parseStreamResponse(res, loadingDiv, sessionId);
                 } else {
                     data = await res.json();
                 }
                 
-                activeGenerations.delete(sessionId);
-                renderSessionList();
+                endOnce();
 
                 const streamTextDiv = data.streamTextDiv;
                 
@@ -2847,7 +3049,8 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                             const imageUrl = httpUrlMatch[1];
                             textContent = content.replace(/!\[.*?\]\((https?:\/\/[^)]+)\)/g, '').trim();
                             try {
-                                const imgRes = await nativeFetch(imageUrl);
+                                const finalUrl = ProxyManager ? ProxyManager.getProxiedUrl(imageUrl) : imageUrl;
+                                const imgRes = await nativeFetch(finalUrl);
                                 const blob = await imgRes.blob();
                                 imageData = await new Promise((resolve) => {
                                     const reader = new FileReader();
@@ -2951,8 +3154,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     body: JSON.stringify(payload)
                 });
                 data = await res.json();
-                activeGenerations.delete(sessionId);
-                renderSessionList();
+                endOnce();
                 if (!res.ok) throw new Error(JSON.stringify(data));
             }
             const streamTextDiv = data.streamTextDiv;
@@ -2989,7 +3191,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                         while ((match = imgRegex.exec(textContent)) !== null) {
                             const url = match[2];
                             const filename = `image_${Date.now()}_${Math.floor(Math.random()*1000)}.png`;
-                            const safeUrl = url;
+                            const safeUrl = ProxyManager ? ProxyManager.getProxiedUrl(url) : url;
                             const isBase64 = safeUrl.startsWith('data:');
 
                             // 提取base64数据并保存
@@ -3107,7 +3309,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 streamDiv.closest('.message-row').remove();
             }
 
-            activeGenerations.delete(sessionId); renderSessionList(); let msg=e.message; try{const jsonErr=JSON.parse(e.message);if(jsonErr.error&&jsonErr.error.message)msg=jsonErr.error.message}catch(_){} const errorHtml=`<div class="msg-content" style="color:#d93025">❌ Error: ${escapeHtml(msg)}</div>`; const errorMsgId = await saveMessage(sessionId,'bot','Error',[],errorHtml); if(sessionId===currentSessionId){ if(loadingDiv)loadingDiv.remove(); appendMessageToUI('bot',errorHtml,'Error',[],errorMsgId) }
+            endOnce(); let msg=e.message; try{const jsonErr=JSON.parse(e.message);if(jsonErr.error&&jsonErr.error.message)msg=jsonErr.error.message}catch(_){} const errorHtml=`<div class="msg-content" style="color:#d93025">❌ Error: ${escapeHtml(msg)}</div>`; const errorMsgId = await saveMessage(sessionId,'bot','Error',[],errorHtml); if(sessionId===currentSessionId){ if(loadingDiv)loadingDiv.remove(); appendMessageToUI('bot',errorHtml,'Error',[],errorMsgId) }
         }
     }
 
@@ -3434,13 +3636,38 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         return {open,close};
     })();
 
-    function openLightbox(src){LightboxController.open(src)}
+    function openLightbox(src){LightboxController.open(ProxyManager ? ProxyManager.getProxiedUrl(src) : src)}
     function closeLightbox(){LightboxController.close()}
+
+    // 提示词卡片图片加载失败时的兜底：优先回退直连，再回退占位图（可被代理）
+    function handlePromptImageError(imgEl){
+        try{
+            if(!imgEl) return;
+            const triedRaw = imgEl.getAttribute('data-tried-raw') === '1';
+            const raw = imgEl.getAttribute('data-raw-src') || '';
+            const placeholder = imgEl.getAttribute('data-placeholder-src') || '';
+            const current = imgEl.getAttribute('src') || '';
+
+            if(!triedRaw && raw && current !== raw){
+                imgEl.setAttribute('data-tried-raw','1');
+                imgEl.src = raw;
+                return;
+            }
+
+            if(placeholder && current !== placeholder){
+                imgEl.src = placeholder;
+            }
+        }catch(_){}
+    }
     const leftSidebar=document.getElementById('left-sidebar');const rightSidebar=document.getElementById('right-sidebar');const overlay=document.getElementById('overlay');
-    function syncOverlay(){if(!overlay)return;const anyOpen=(leftSidebar&&leftSidebar.classList.contains('open'))||(rightSidebar&&rightSidebar.classList.contains('open'));overlay.classList.toggle('active',!!anyOpen)}
-    function toggleLeftSidebar(forceOpen){if(!leftSidebar)return;const next=typeof forceOpen==='boolean'?forceOpen:!leftSidebar.classList.contains('open');leftSidebar.classList.toggle('open',next);if(rightSidebar)rightSidebar.classList.remove('open');syncOverlay()}
-    function toggleSettings(forceOpen){if(!rightSidebar)return;const next=typeof forceOpen==='boolean'?forceOpen:!rightSidebar.classList.contains('open');rightSidebar.classList.toggle('open',next);if(leftSidebar)leftSidebar.classList.remove('open');syncOverlay()}
-    function closeAllSidebars(){if(leftSidebar)leftSidebar.classList.remove('open');if(rightSidebar)rightSidebar.classList.remove('open');if(overlay)overlay.classList.remove('active')}
+    const SIDEBAR_OVERLAY_MAX_WIDTH = 768;
+    function isSidebarOverlayMode(){return window.innerWidth<=SIDEBAR_OVERLAY_MAX_WIDTH}
+    function updateSettingsPinnedLayout(){if(!rightSidebar) return;const open=rightSidebar.classList.contains('open');document.body.classList.toggle('settings-open',!!open&&!isSidebarOverlayMode())}
+    function syncOverlay(){if(!overlay)return;if(!isSidebarOverlayMode()){overlay.classList.remove('active');return}const anyOpen=(leftSidebar&&leftSidebar.classList.contains('open'))||(rightSidebar&&rightSidebar.classList.contains('open'));overlay.classList.toggle('active',!!anyOpen)}
+    function toggleLeftSidebar(forceOpen){if(!leftSidebar)return;const next=typeof forceOpen==='boolean'?forceOpen:!leftSidebar.classList.contains('open');leftSidebar.classList.toggle('open',next);if(isSidebarOverlayMode()&&rightSidebar)rightSidebar.classList.remove('open');updateSettingsPinnedLayout();syncOverlay()}
+    function toggleSettings(forceOpen){if(!rightSidebar)return;const next=typeof forceOpen==='boolean'?forceOpen:!rightSidebar.classList.contains('open');rightSidebar.classList.toggle('open',next);try{localStorage.setItem('settings_open',String(!!next))}catch(_){}if(isSidebarOverlayMode()&&leftSidebar)leftSidebar.classList.remove('open');updateSettingsPinnedLayout();syncOverlay()}
+    function closeAllSidebars(){if(isSidebarOverlayMode()){if(leftSidebar)leftSidebar.classList.remove('open');if(rightSidebar)rightSidebar.classList.remove('open')}updateSettingsPinnedLayout();syncOverlay()}
+    window.addEventListener('resize',()=>{updateSettingsPinnedLayout();syncOverlay()});
     UI.textarea.addEventListener('input',function(){adjustTextareaHeight();checkInput()});
     UI.textarea.addEventListener('keydown',(e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});
     

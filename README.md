@@ -148,6 +148,25 @@ http://localhost:8000
 
 ---
 
+## ☁️ 部署到 Cloudflare Pages（推荐）
+
+本项目为纯静态站点，可直接部署到 Cloudflare Pages。仓库内已包含 Pages Functions 代理端点：`/proxy?url=...`，用于在部分网络环境下更稳定地加载外部提示词资源（尤其是提示词图片/在线提示词源）。
+
+### 部署步骤（无构建）
+
+1. Cloudflare Dashboard → **Pages** → Create a project → 选择该仓库
+2. **Build command** 留空（或不设置），**Build output directory** 设为 `/`
+3. 部署完成后访问站点
+
+### 代理与安全（可选配置）
+
+- 站点右侧设置里提供 **网络加速** 开关（默认在非 `localhost` 环境自动开启）
+- 可在 Pages 项目里添加环境变量：
+  - `PROXY_ALLOWLIST`：代理白名单域名，逗号分隔（示例：`raw.githubusercontent.com,cdn.jsdelivr.net,fastly.jsdelivr.net`），设置为 `*` 表示放开
+  - `PROXY_MAX_BYTES`：单次代理响应最大字节数（默认 25MB）
+
+---
+
 ## 📦 技术栈
 
 - **前端框架**：原生 JavaScript（无框架依赖）
