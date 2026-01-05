@@ -494,6 +494,8 @@
                  <div class="banana-source-tab" data-source-id="local_prompts_json">OpenNana</div>
                  <div class="banana-source-tab" data-source-id="local_prompts2_md">YouMind</div>
                  <div class="banana-source-tab" data-source-id="local_prompts3_md">AIArtPics</div>
+                 <div class="banana-source-tab" data-source-id="online_dracohu_md">Twitter Collection V2</div>
+                 <div class="banana-source-tab" data-source-id="online_2slides_md">2slides PPT</div>
              </div>
 
               <div id="banana-category-tabs" class="banana-tabs"></div>
@@ -621,8 +623,19 @@
     </div>
 
     <div id="lightbox" class="lightbox-overlay" onclick="closeLightbox()">
-        <span class="lightbox-close">&times;</span>
-        <img class="lightbox-img" id="lightbox-image" src="" onclick="event.stopPropagation()">
+        <span class="lightbox-close" onclick="closeLightbox()">&times;</span>
+        <button id="lightbox-prev" class="lightbox-nav lightbox-prev" onclick="event.stopPropagation(); lightboxPrev()" aria-label="上一张">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+        </button>
+        <img class="lightbox-img" id="lightbox-image" src="" onclick="event.stopPropagation()" onerror="handlePromptImageError(this)">
+        <button id="lightbox-next" class="lightbox-nav lightbox-next" onclick="event.stopPropagation(); lightboxNext()" aria-label="下一张">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+        </button>
+        <div id="lightbox-counter" class="lightbox-counter" onclick="event.stopPropagation()"></div>
     </div>
     
     <!-- Toast 提示 -->

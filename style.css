@@ -1499,6 +1499,50 @@
         .lightbox-overlay.zoomed .lightbox-img { cursor: grab; }
         .lightbox-overlay.zoomed .lightbox-img:active { cursor: grabbing; }
         .lightbox-close { position: absolute; top: 24px; right: 24px; color: white; font-size: 32px; cursor: pointer; opacity: 0.7; transition: opacity 0.2s; }
+        .lightbox-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 44px;
+            height: 44px;
+            border-radius: 999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: rgba(255,255,255,0.92);
+            background: rgba(255,255,255,0.12);
+            border: 1px solid rgba(255,255,255,0.22);
+            cursor: pointer;
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            transition: transform 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+            user-select: none;
+        }
+        .lightbox-nav:hover { background: rgba(255,255,255,0.18); transform: translateY(-50%) scale(1.05); }
+        .lightbox-nav:disabled { opacity: 0.25; cursor: default; transform: translateY(-50%) scale(1); }
+        .lightbox-prev { left: 18px; }
+        .lightbox-next { right: 18px; }
+        .lightbox-counter {
+            position: absolute;
+            bottom: 18px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+            color: rgba(255,255,255,0.9);
+            background: rgba(0,0,0,0.35);
+            border: 1px solid rgba(255,255,255,0.18);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            user-select: none;
+        }
+        @media (max-width: 480px) {
+            .lightbox-nav { width: 40px; height: 40px; }
+            .lightbox-prev { left: 12px; }
+            .lightbox-next { right: 12px; }
+        }
         
         .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 1990; display: none; backdrop-filter: blur(2px); }
         .overlay.active { display: block; }

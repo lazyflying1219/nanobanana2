@@ -439,7 +439,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             this.sourceTabsEl = document.getElementById('banana-source-tabs');
             this.categoryTabsEl = document.getElementById('banana-category-tabs');
 
-             const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md', 'local_prompts3_md']);
+             const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md', 'local_prompts3_md', 'online_dracohu_md', 'online_2slides_md']);
              const savedSourceId = (localStorage.getItem('banana_source_id') || '').trim();
              const preferredSourceId = supportedSourceIds.has(savedSourceId) ? savedSourceId : 'banana_online';
 
@@ -489,21 +489,24 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     if (action === 'copy') {
                         this.copy(item.prompt);
                         e.preventDefault();
-                    } else if (action === 'preview') {
-                        const imgEl = actionEl.tagName === 'IMG' ? actionEl : cardEl.querySelector('img.banana-img');
-                        const src = imgEl && imgEl.src ? imgEl.src : item.preview;
-                        if (src && typeof openLightbox === 'function') {
-                            openLightbox(src);
-                        } else if (src) {
-                            window.open(src, '_blank', 'noopener');
-                        } else {
-                            showToast('暂无可预览图片', 'warning');
-                        }
-                        e.preventDefault();
-                    } else if (action === 'fill') {
-                        this.sendToInput(item.prompt, false);
-                        e.preventDefault();
-                    } else if (action === 'save') {
+                     } else if (action === 'preview') {
+                         const imgEl = actionEl.tagName === 'IMG' ? actionEl : cardEl.querySelector('img.banana-img');
+                         const src = imgEl && imgEl.src ? imgEl.src : item.preview;
+                         const images = Array.isArray(item.images) ? item.images.filter(Boolean) : [];
+                         if (typeof openLightbox === 'function') {
+                             if (images.length > 0) openLightbox(images, 0);
+                             else if (src) openLightbox(src);
+                             else showToast('暂无可预览图片', 'warning');
+                         } else if (src) {
+                             window.open(src, '_blank', 'noopener');
+                         } else {
+                             showToast('暂无可预览图片', 'warning');
+                         }
+                         e.preventDefault();
+                     } else if (action === 'fill') {
+                         this.sendToInput(item.prompt, false);
+                         e.preventDefault();
+                     } else if (action === 'save') {
                         this.saveToCustom(item.title, item.prompt);
                         e.preventDefault();
                     }
@@ -582,14 +585,14 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
 
             this.categoryTabsEl.appendChild(frag);
         },
-        prepareItems(data = [], sourceId = '') {
-            const rawItems = Array.isArray(data) ? data : [];
-            const placeholder = this.getPlaceholderPreview();
-            const normalizedSource = this.normalizeText(sourceId, 'banana');
-            const usedIds = new Set();
+         prepareItems(data = [], sourceId = '') {
+             const rawItems = Array.isArray(data) ? data : [];
+             const placeholder = this.getPlaceholderPreview();
+             const normalizedSource = this.normalizeText(sourceId, 'banana');
+             const usedIds = new Set();
 
-            return rawItems.map((rawItem, idx) => {
-                const it = (rawItem && typeof rawItem === 'object') ? rawItem : {};
+             return rawItems.map((rawItem, idx) => {
+                 const it = (rawItem && typeof rawItem === 'object') ? rawItem : {};
                 let id = this.normalizeText(it.id, `${normalizedSource}_${idx + 1}`);
                 if (usedIds.has(id)) id = `${id}_${idx + 1}`;
                 usedIds.add(id);
@@ -599,20 +602,16 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 const category = this.normalizeText(it.category, '其他');
                 const subCategory = this.normalizeText(it.sub_category, '');
                 const mode = this.normalizeText(it.mode, 'generate');
-                const preview = this.normalizeText(it.preview, '') || placeholder;
-                const author = this.normalizeText(it.author, '');
-                const link = this.normalizeText(it.link, '');
+                 const preview = this.normalizeText(it.preview, '') || placeholder;
+                 const author = this.normalizeText(it.author, '');
+                 const link = this.normalizeText(it.link, '');
 
-                const tags = Array.isArray(it.tags) ? it.tags
-                    .filter(t => typeof t === 'string')
-                    .map(t => t.trim())
-                    .filter(Boolean)
-                    : [];
+                 const tags = this.normalizeTags(it.tags, normalizedSource);
 
-                const filterCandidates = normalizedSource === 'local_prompts_json'
-                    ? [...tags, mode]
-                    : [...tags, category, subCategory, mode].filter(Boolean);
-                const filterSet = new Set();
+                 const filterCandidates = normalizedSource === 'local_prompts_json'
+                     ? [...tags, mode]
+                     : [...tags, category, subCategory, mode].filter(Boolean);
+                 const filterSet = new Set();
                 filterCandidates.forEach(label => {
                     const key = this.normalizeCategoryKey(label);
                     if (!key || key === 'all') return;
@@ -639,15 +638,116 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     tags,
                     filterTags: Array.from(filterSet),
                     __searchText: searchText,
-                    __bananaPrepared: true
-                };
-            });
-        },
-        getOpenNanaCategoryLabel(key, fallbackLabel = '') {
-            const k = this.normalizeCategoryKey(key);
-            const map = {
-                'photography': '摄影',
-                'nature': '自然',
+                     __bananaPrepared: true
+                 };
+             });
+         },
+         normalizeTags(rawTags, sourceId = '') {
+             const src = this.normalizeText(sourceId, '').trim();
+             const input = Array.isArray(rawTags) ? rawTags : [];
+             const result = [];
+
+             const push = (value) => {
+                 const text = this.normalizeText(value, '');
+                 if (!text) return;
+                 const normalized = text.replace(/\s+/g, ' ').trim();
+                 if (!normalized) return;
+                 if (normalized === '[object Object]') return;
+                 // 兜底：避免把“整段对象串”当分类标签渲染到 UI 顶部
+                 if (normalized.length > 1600) return;
+                 result.push(normalized);
+             };
+
+             const pushMany = (values) => {
+                 if (!Array.isArray(values)) return;
+                 values.forEach(v => push(v));
+             };
+
+             input.forEach(tag => {
+                 if (tag === null || tag === undefined) return;
+                 if (typeof tag === 'string') {
+                     const raw = tag.trim();
+                     if (!raw) return;
+
+                     if (src === 'local_prompts2_md') {
+                         const extracted = this.extractYouMindTagTitles(raw);
+                         if (extracted.length > 0) {
+                             pushMany(extracted);
+                             return;
+                         }
+                     }
+
+                     // 通用：长字符串里若包含 title 字段，尝试抽取（避免 UI 被长文本撑爆）
+                     if (raw.length > 120 && (raw.includes("'title'") || raw.includes('"title"'))) {
+                         const title = this.extractFirstTitleLike(raw);
+                         if (title) {
+                             push(title);
+                             return;
+                         }
+                         return;
+                     }
+
+                     push(raw);
+                     return;
+                 }
+
+                 if (typeof tag === 'object') {
+                     const maybe = tag.title || tag.name || tag.slug;
+                     if (maybe) push(String(maybe));
+                     return;
+                 }
+
+                 push(String(tag));
+             });
+
+             const seen = new Set();
+             const uniq = [];
+             for (const t of result) {
+                 if (seen.has(t)) continue;
+                 seen.add(t);
+                 uniq.push(t);
+             }
+             return uniq.slice(0, 24);
+         },
+         extractFirstTitleLike(text) {
+             const s = this.normalizeText(text, '');
+             if (!s) return '';
+             const m1 = s.match(/'title'\s*:\s*'([^']+)'/);
+             if (m1 && m1[1]) return this.normalizeText(m1[1], '');
+             const m2 = s.match(/"title"\s*:\s*"([^"]+)"/);
+             if (m2 && m2[1]) return this.normalizeText(m2[1], '');
+             return '';
+         },
+         extractYouMindTagTitles(text) {
+             const raw = this.normalizeText(text, '').trim();
+             if (!raw) return [];
+             // 仅处理 youmind 导出的“Python dict 字符串”标签：包含 slugLock/parent 等字段
+             const looksLikeDict = raw.startsWith('{') && raw.includes('slugLock') && (raw.includes("'title'") || raw.includes('"title"'));
+             if (!looksLikeDict) return [];
+
+             const own = this.extractFirstTitleLike(raw);
+             let parent = '';
+             const parentIdx = raw.indexOf("'parent':");
+             if (parentIdx > -1) {
+                 const slice = raw.slice(parentIdx, Math.min(raw.length, parentIdx + 420));
+                 const braceIdx = slice.indexOf('{');
+                 if (braceIdx > -1) {
+                     const head = slice.slice(braceIdx, Math.min(slice.length, braceIdx + 260));
+                     const cut = head.split("'children'")[0].split('"children"')[0];
+                     parent = this.extractFirstTitleLike(cut);
+                 }
+             }
+
+             const tags = [];
+             if (parent) tags.push(parent);
+             if (own && own !== parent) tags.push(own);
+             return tags;
+         },
+         getOpenNanaCategoryLabel(key, fallbackLabel = '') {
+             const k = this.normalizeCategoryKey(key);
+             const map = {
+                 'photography': '摄影',
+                 'nature': '自然',
                 'landscape': '风景',
                 'portrait': '人像',
                 'vehicle': '交通工具',
@@ -773,7 +873,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         },
         close() { this.modal.classList.remove('active'); },
          changeSource(sourceId) {
-             const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md', 'local_prompts3_md']);
+             const supportedSourceIds = new Set(['banana_online', 'local_prompts_json', 'local_prompts2_md', 'local_prompts3_md', 'online_dracohu_md', 'online_2slides_md']);
              const nextSourceId = supportedSourceIds.has((sourceId || '').trim()) ? sourceId.trim() : 'banana_online';
 
             if (nextSourceId === this.activeSourceId && this.loadedSourceId === nextSourceId) {
@@ -829,6 +929,10 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                      data = await this.loadYouMindLocalJson();
                  } else if (this.activeSourceId === 'local_prompts3_md') {
                      data = await this.loadAiArtPicsLocalMarkdown();
+                 } else if (this.activeSourceId === 'online_dracohu_md') {
+                     data = await this.loadDracoHuOnlineMarkdown();
+                 } else if (this.activeSourceId === 'online_2slides_md') {
+                     data = await this.load2SlidesOnlineMarkdown();
                  } else {
                      throw new Error(`未知提示词源：${this.activeSourceId}`);
                  }
@@ -904,7 +1008,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             if (!raw) return '';
             return raw.startsWith('@') ? raw.slice(1) : raw;
         },
-        async loadBananaOnline() {
+         async loadBananaOnline() {
             const URLS = [
                 'https://raw.githubusercontent.com/glidea/banana-prompt-quicker/refs/heads/main/prompts.json',
                 'https://cdn.jsdelivr.net/gh/glidea/banana-prompt-quicker@main/prompts.json',
@@ -929,21 +1033,26 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     });
                     if (safeData.length === 0) throw new Error('数据加载失败（过滤后为空）');
 
-                    return safeData.map((item, idx) => {
-                        const normalized = (item && typeof item === 'object') ? item : {};
-                        return {
-                            id: this.normalizeText(normalized.id, `banana_${idx + 1}`),
-                            title: this.normalizeText(normalized.title, `未命名-${idx + 1}`),
-                            prompt: this.normalizeText(normalized.prompt, ''),
-                            category: this.normalizeText(normalized.category, '其他'),
-                            mode: this.normalizeText(normalized.mode, 'generate'),
-                            preview: this.normalizeText(normalized.preview, this.getPlaceholderPreview()),
-                            author: this.normalizeText(normalized.author, ''),
-                            link: this.normalizeText(normalized.link, ''),
-                            sub_category: this.normalizeText(normalized.sub_category, ''),
-                            created: this.normalizeText(normalized.created, ''),
-                        };
-                    });
+                     return safeData.map((item, idx) => {
+                         const normalized = (item && typeof item === 'object') ? item : {};
+                         const preview = this.normalizeText(normalized.preview, this.getPlaceholderPreview());
+                         const images = Array.isArray(normalized.images)
+                             ? normalized.images.filter(Boolean)
+                             : (preview ? [preview] : []);
+                         return {
+                             id: this.normalizeText(normalized.id, `banana_${idx + 1}`),
+                             title: this.normalizeText(normalized.title, `未命名-${idx + 1}`),
+                             prompt: this.normalizeText(normalized.prompt, ''),
+                             category: this.normalizeText(normalized.category, '其他'),
+                             mode: this.normalizeText(normalized.mode, 'generate'),
+                             preview,
+                             author: this.normalizeText(normalized.author, ''),
+                             link: this.normalizeText(normalized.link, ''),
+                             sub_category: this.normalizeText(normalized.sub_category, ''),
+                             created: this.normalizeText(normalized.created, ''),
+                             images,
+                         };
+                     });
 
                 } catch(e) {
                     console.warn(`源 ${i + 1} 失败:`, URLS[i], e.message);
@@ -952,39 +1061,344 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 }
             }
 
-            throw lastError || new Error('所有在线源均不可用');
-        },
-        async loadOpenNanaLocalJson() {
-            if (typeof location !== 'undefined' && location.protocol === 'file:') {
-                throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
-            }
+             throw lastError || new Error('所有在线源均不可用');
+         },
+         buildGithubMirrorUrls(repoSlug, filePath, { branch = 'main' } = {}) {
+             const repo = this.normalizeText(repoSlug, '').replace(/^\/+|\/+$/g, '');
+             const path = this.normalizeText(filePath, '').replace(/^\/+/, '');
+             if (!repo || !path) return [];
+             return [
+                 `https://raw.githubusercontent.com/${repo}/${branch}/${path}`,
+                 `https://cdn.jsdelivr.net/gh/${repo}@${branch}/${path}`,
+                 `https://fastly.jsdelivr.net/gh/${repo}@${branch}/${path}`,
+                 `http://gh.halonice.com/https://raw.githubusercontent.com/${repo}/${branch}/${path}`
+             ];
+         },
+         async fetchTextFromUrls(urls, { minLength = 50 } = {}) {
+             const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
+             let lastError = null;
+             for (let i = 0; i < list.length; i++) {
+                 try {
+                     const fetcher = (ProxyManager && ProxyManager.isEnabled()) ? ProxyManager : null;
+                     const res = fetcher ? await fetcher.fetch(list[i], { timeout: 12000 }) : await nativeFetch(list[i], { timeout: 12000 });
+                     if (!res.ok) throw new Error(`HTTP ${res.status}: 在线数据加载失败`);
+                     const text = await res.text();
+                     if (!text || text.length < minLength) throw new Error('在线数据为空或过短');
+                     return text;
+                 } catch (e) {
+                     console.warn(`在线源 ${i + 1} 失败:`, list[i], e && e.message ? e.message : e);
+                     lastError = e;
+                 }
+             }
+             throw lastError || new Error('所有在线源均不可用');
+         },
+         parseDracoHuMarkdown(text) {
+             const placeholder = this.getPlaceholderPreview();
+             const lines = String(text || '').split(/\r?\n/);
+             const items = [];
+ 
+             let current = null;
+             let inFence = false;
+             let fenceBuf = [];
+ 
+             const flush = () => {
+                 if (!current) return;
+                 const prompt = this.normalizeText(current.prompt, '');
+                 const images = Array.isArray(current.images) ? current.images.filter(Boolean) : [];
+                 if (!prompt) { current = null; return; }
+ 
+                 const title = this.normalizeText(current.title, current.caseId ? `Case: ${current.caseId}` : `Case-${items.length + 1}`);
+                 const id = current.caseId ? `dracohu_${current.caseId}` : `dracohu_${items.length + 1}`;
+                 const author = this.sanitizeAuthor(current.author || '');
+                 const link = this.normalizeText(current.tweet, '');
+                 const mode = this.inferAiArtMode(prompt);
+ 
+                 items.push({
+                     id,
+                     title,
+                     prompt,
+                     category: 'DracoHu',
+                     sub_category: 'Twitter Collection',
+                     mode,
+                     preview: images[0] || placeholder,
+                     author: author || 'DracoHu',
+                     link,
+                     tags: ['Twitter'],
+                     images
+                 });
+ 
+                 current = null;
+             };
+ 
+             for (let i = 0; i < lines.length; i++) {
+                 const line = lines[i];
+ 
+                 const caseMatch = line.match(/^##\s+Case:\s*(.+?)\s*$/i);
+                 if (caseMatch) {
+                     flush();
+                     current = {
+                         caseId: caseMatch[1].trim(),
+                         title: '',
+                         author: '',
+                         tweet: '',
+                         images: [],
+                         prompt: ''
+                     };
+                     inFence = false;
+                     fenceBuf = [];
+                     continue;
+                 }
+ 
+                 if (!current) continue;
+ 
+                 if (inFence) {
+                     if (/^```/.test(line)) {
+                         inFence = false;
+                         current.prompt = fenceBuf.join('\n').trim();
+                         fenceBuf = [];
+                         continue;
+                     }
+                     fenceBuf.push(line);
+                     continue;
+                 }
+ 
+                 const authorMatch = line.match(/^\*\*Author:\*\*\s*\[([^\]]+)\]\(([^)]+)\)\s*$/i);
+                 if (authorMatch) {
+                     current.author = authorMatch[1].trim();
+                     continue;
+                 }
+ 
+                 const tweetMatch = line.match(/^\*\*Tweet:\*\*\s*\[[^\]]+\]\(([^)]+)\)\s*$/i);
+                 if (tweetMatch) {
+                     current.tweet = tweetMatch[1].trim();
+                     continue;
+                 }
+ 
+                 const imgMatch = line.match(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/i);
+                 if (imgMatch) {
+                     current.images.push(imgMatch[1].trim());
+                     continue;
+                 }
+ 
+                 if (/^```/.test(line)) {
+                     inFence = true;
+                     fenceBuf = [];
+                     continue;
+                 }
+             }
+ 
+             flush();
+             return items;
+         },
+         async loadDracoHuOnlineMarkdown() {
+             const urls = this.buildGithubMirrorUrls(
+                 'dracohu2025-cloud/awesome-nano-banana',
+                 'NANO_BANANA_PRO_PROMPTS_V2.md'
+             );
+             const text = await this.fetchTextFromUrls(urls, { minLength: 200 });
+             const items = this.parseDracoHuMarkdown(text);
+             if (!items.length) throw new Error('未从在线文档解析到提示词，请稍后重试或更换网络');
+             return items;
+         },
+         parse2SlidesReadme(text) {
+             const lines = String(text || '').split(/\r?\n/);
+             const entries = [];
+             let current = null;
+ 
+             const flush = () => {
+                 if (!current) return;
+                 if (current.promptPath) entries.push(current);
+                 current = null;
+             };
+ 
+             for (let i = 0; i < lines.length; i++) {
+                 const line = lines[i];
+                 const header = line.match(/^\-\s*###\s*\[([^\]]+)\]\((prompts\/[^)]+\/prompt\.md)\)\s*$/i);
+                 if (header) {
+                     flush();
+                     current = {
+                         title: header[1].trim(),
+                         promptPath: header[2].trim(),
+                         previewPath: '',
+                         tags: [],
+                         contributor: '',
+                         contributorLink: ''
+                     };
+                     continue;
+                 }
+ 
+                 if (!current) continue;
+ 
+                 const preview = line.match(/!\[Preview\]\(([^)]+)\)/i);
+                 if (preview && preview[1]) {
+                     current.previewPath = preview[1].trim();
+                     continue;
+                 }
+ 
+                 if (line.includes('**Tags:**')) {
+                     const tags = [];
+                     const reg = /`([^`]+)`/g;
+                     let m;
+                     while ((m = reg.exec(line))) {
+                         const t = (m[1] || '').trim();
+                         if (t) tags.push(t);
+                     }
+                     if (tags.length) current.tags = tags;
+                     continue;
+                 }
+ 
+                 const contributor = line.match(/^\s*\*\*Contributor:\*\*\s*\[([^\]]+)\]\(([^)]+)\)\s*$/i);
+                 if (contributor) {
+                     current.contributor = contributor[1].trim();
+                     current.contributorLink = contributor[2].trim();
+                     continue;
+                 }
+             }
+ 
+             flush();
+             return entries;
+         },
+         parse2SlidesPromptMarkdown(text) {
+             const lines = String(text || '').split(/\r?\n/);
+             let prompt = '';
+             let inPrompt = false;
+             let inImages = false;
+             const promptBuf = [];
+             const images = [];
+ 
+             for (let i = 0; i < lines.length; i++) {
+                 const line = lines[i];
+                 if (/^##\s+Prompt Text\s*$/i.test(line)) {
+                     inPrompt = true;
+                     inImages = false;
+                     continue;
+                 }
+                 if (/^##\s+Reference Images\s*$/i.test(line)) {
+                     inImages = true;
+                     inPrompt = false;
+                     continue;
+                 }
+                 if (/^##\s+/.test(line)) {
+                     inPrompt = false;
+                     inImages = false;
+                 }
+ 
+                 if (inPrompt) {
+                     if (line.trim() !== '') promptBuf.push(line);
+                 } else if (inImages) {
+                     const imgMatch = line.match(/!\[[^\]]*\]\(([^)]+)\)/i);
+                     if (imgMatch && imgMatch[1]) images.push(imgMatch[1].trim());
+                 }
+             }
+ 
+             prompt = promptBuf.join('\n').trim();
+             return { prompt, images };
+         },
+         async load2SlidesOnlineMarkdown() {
+             const readmeUrls = this.buildGithubMirrorUrls('2slides/awesome-nano-banana-ppt-prompts', 'README.md');
+             const readmeText = await this.fetchTextFromUrls(readmeUrls, { minLength: 200 });
+             const entries = this.parse2SlidesReadme(readmeText);
+             if (!entries.length) throw new Error('未从在线目录解析到提示词列表');
+ 
+             const rawRoot = 'https://raw.githubusercontent.com/2slides/awesome-nano-banana-ppt-prompts/main/';
+             const repoRoot = 'https://github.com/2slides/awesome-nano-banana-ppt-prompts/blob/main/';
+ 
+             const loadOne = async (entry) => {
+                 const promptPath = this.normalizeText(entry.promptPath, '').replace(/^\/+/, '');
+                 if (!promptPath) return null;
+                 const promptUrls = this.buildGithubMirrorUrls('2slides/awesome-nano-banana-ppt-prompts', promptPath);
+                 const md = await this.fetchTextFromUrls(promptUrls, { minLength: 50 });
+                 const parsed = this.parse2SlidesPromptMarkdown(md);
+ 
+                 const dir = promptPath.replace(/\/prompt\.md$/i, '/');
+                 const baseDir = rawRoot + dir;
+ 
+                 const imagesRel = Array.isArray(parsed.images) ? parsed.images : [];
+                 const imagesFromPrompt = imagesRel
+                     .map(p => this.buildAbsoluteUrl(p, baseDir))
+                     .filter(Boolean);
+ 
+                 const imagesFromReadme = entry.previewPath
+                     ? [this.buildAbsoluteUrl(entry.previewPath, rawRoot)]
+                     : [];
+ 
+                 const images = Array.from(new Set([...imagesFromPrompt, ...imagesFromReadme])).filter(Boolean);
+                 const preview = images[0] || this.getPlaceholderPreview();
+ 
+                 const folder = dir.split('/').filter(Boolean).slice(-1)[0] || '';
+                 const id = folder ? `2slides_${folder}` : `2slides_${entries.indexOf(entry) + 1}`;
+ 
+                 const prompt = this.normalizeText(parsed.prompt, '');
+                 if (!prompt) return null;
+ 
+                 const mode = this.inferAiArtMode(prompt);
+                 const tags = Array.isArray(entry.tags) ? entry.tags : [];
+ 
+                 return {
+                     id,
+                     title: this.normalizeText(entry.title, folder ? folder : id),
+                     prompt,
+                     category: '2slides',
+                     sub_category: 'PPT',
+                     mode,
+                     preview,
+                     author: this.normalizeText(entry.contributor, '2slides'),
+                     link: repoRoot + promptPath,
+                     tags: ['PPT', ...tags].filter(Boolean),
+                     images
+                 };
+             };
+ 
+             const results = [];
+             const CONCURRENCY = 6;
+             for (let i = 0; i < entries.length; i += CONCURRENCY) {
+                 const batch = entries.slice(i, i + CONCURRENCY);
+                 const batchItems = await Promise.all(batch.map(e => loadOne(e).catch(() => null)));
+                 batchItems.forEach(it => { if (it) results.push(it); });
+             }
+ 
+             if (!results.length) throw new Error('在线提示词加载失败（解析后为空）');
+             return results;
+         },
+         async loadOpenNanaLocalJson() {
+             if (typeof location !== 'undefined' && location.protocol === 'file:') {
+                 throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
+             }
             const res = await nativeFetch('./prompts.json');
             if (!res.ok) throw new Error(`本地提示词数据加载失败 (HTTP ${res.status})`);
             const json = await res.json();
             if (!json || !Array.isArray(json.items)) throw new Error('本地提示词数据格式不正确：需要 { items: [] }');
 
             const base = 'https://opennana.com/awesome-prompt-gallery/';
-            const placeholder = this.getPlaceholderPreview();
+             const placeholder = this.getPlaceholderPreview();
 
-             return json.items.map((item, idx) => {
-                const it = (item && typeof item === 'object') ? item : {};
-                const prompts = Array.isArray(it.prompts) ? it.prompts.filter(Boolean) : [];
-                const combinedPrompt = prompts.length > 0 ? prompts.join('\n\n---\n\n') : this.normalizeText(it.prompt, '');
-                const previewPath = this.normalizeText(it.coverImage, '') || (Array.isArray(it.images) && it.images.length ? it.images[0] : '');
+              return json.items.map((item, idx) => {
+                 const it = (item && typeof item === 'object') ? item : {};
+                 const prompts = Array.isArray(it.prompts) ? it.prompts.filter(Boolean) : [];
+                 const combinedPrompt = prompts.length > 0 ? prompts.join('\n\n---\n\n') : this.normalizeText(it.prompt, '');
+                 const previewPath = this.normalizeText(it.coverImage, '') || (Array.isArray(it.images) && it.images.length ? it.images[0] : '');
+                 const imagePaths = [];
+                 const cover = this.normalizeText(it.coverImage, '');
+                 if (cover) imagePaths.push(cover);
+                 if (Array.isArray(it.images)) imagePaths.push(...it.images);
+                 const images = Array.from(new Set(imagePaths.map(p => this.buildAbsoluteUrl(p, base)).filter(Boolean)));
+                 const preview = this.buildAbsoluteUrl(previewPath, base) || placeholder;
+                 if (images.length === 0 && preview) images.push(preview);
 
-                return {
-                    id: this.normalizeText(it.id, it.slug ? `opennana_${it.slug}` : `opennana_${idx + 1}`),
-                    title: this.normalizeText(it.title, this.normalizeText(it.slug, `OpenNana-${idx + 1}`)),
-                    prompt: combinedPrompt,
-                    category: 'OpenNana',
-                    mode: 'generate',
-                    preview: this.buildAbsoluteUrl(previewPath, base) || placeholder,
-                    author: this.sanitizeAuthor(it.source && it.source.name ? it.source.name : ''),
-                    link: this.normalizeText(it.source && it.source.url ? it.source.url : '', ''),
-                    tags: Array.isArray(it.tags) ? it.tags : []
-                };
-            });
-         },
+                 return {
+                     id: this.normalizeText(it.id, it.slug ? `opennana_${it.slug}` : `opennana_${idx + 1}`),
+                     title: this.normalizeText(it.title, this.normalizeText(it.slug, `OpenNana-${idx + 1}`)),
+                     prompt: combinedPrompt,
+                     category: 'OpenNana',
+                     mode: 'generate',
+                     preview,
+                     author: this.sanitizeAuthor(it.source && it.source.name ? it.source.name : ''),
+                     link: this.normalizeText(it.source && it.source.url ? it.source.url : '', ''),
+                     tags: Array.isArray(it.tags) ? it.tags : [],
+                     images
+                 };
+             });
+          },
          async loadYouMindLocalJson() {
              if (typeof location !== 'undefined' && location.protocol === 'file:') {
                  throw new Error('本地文件方式打开会被浏览器限制，请通过本地服务器访问。');
@@ -1053,9 +1467,17 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                  return !hasNsfw;
              });
 
-             if (safeData.length === 0) throw new Error('数据加载失败（过滤后为空）');
-             return safeData;
-         },
+              if (safeData.length === 0) throw new Error('数据加载失败（过滤后为空）');
+             const placeholder = this.getPlaceholderPreview();
+             return safeData.map((item, idx) => {
+                 const it = (item && typeof item === 'object') ? item : {};
+                 const media = Array.isArray(it.media) ? it.media.filter(Boolean) : [];
+                 const thumbs = Array.isArray(it.mediaThumbnails) ? it.mediaThumbnails.filter(Boolean) : [];
+                 const preview = this.normalizeText(it.preview, '') || thumbs[0] || media[0] || placeholder;
+                 const images = media.length > 0 ? media : (thumbs.length > 0 ? thumbs : (preview ? [preview] : []));
+                 return { ...it, id: this.normalizeText(it.id, `youmind_${idx + 1}`), preview, images };
+             });
+          },
          parseYouMindMarkdown(text) {
              const placeholder = this.getPlaceholderPreview();
              const lines = String(text || '').split(/\r?\n/);
@@ -3758,9 +4180,12 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
     
     const LightboxController=(()=>{
         let inited=false; let el=null; let img=null;
+        let prevBtn=null; let nextBtn=null; let counterEl=null;
+        let sources=[]; let index=0;
         let scale=1; let tx=0; let ty=0;
         const pointers=new Map(); let gesture=null;
         const MIN_SCALE=1; const MAX_SCALE=6;
+        const PLACEHOLDER='https://placehold.co/600x400/e2e8f0/94a3b8?text=No+Preview';
 
         const isActive=()=>el&&el.classList.contains('active');
         const clampScale=(s)=>Math.max(MIN_SCALE,Math.min(MAX_SCALE,s));
@@ -3771,6 +4196,60 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             img.style.cursor=scale>1.01?'grab':'zoom-in';
         };
         const reset=()=>{scale=1; tx=0; ty=0; gesture=null; pointers.clear(); apply();};
+
+        const normalizeList=(srcOrList)=>{
+            const list=Array.isArray(srcOrList)?srcOrList:[srcOrList];
+            const cleaned=[];
+            list.forEach(u=>{
+                const t=String(u||'').trim();
+                if(t) cleaned.push(t);
+            });
+            const uniq=[]; const seen=new Set();
+            cleaned.forEach(u=>{if(seen.has(u)) return; seen.add(u); uniq.push(u);});
+            return uniq;
+        };
+
+        const updateNav=()=>{
+            if(!prevBtn||!nextBtn||!counterEl) return;
+            const multi=sources.length>1;
+            prevBtn.style.display=multi?'':'none';
+            nextBtn.style.display=multi?'':'none';
+            counterEl.style.display=multi?'':'none';
+            prevBtn.disabled=!multi;
+            nextBtn.disabled=!multi;
+            counterEl.textContent=multi?`${index+1} / ${sources.length}`:'';
+        };
+
+        const setImage=(rawSrc)=>{
+            if(!img) return;
+            const raw=String(rawSrc||'').trim();
+            const placeholderFinal=ProxyManager?ProxyManager.getProxiedUrl(PLACEHOLDER):PLACEHOLDER;
+            img.setAttribute('data-tried-raw','0');
+            img.setAttribute('data-raw-src',raw);
+            img.setAttribute('data-placeholder-src',placeholderFinal);
+            const finalSrc=ProxyManager?ProxyManager.getProxiedUrl(raw):raw;
+            img.src=(finalSrc||placeholderFinal);
+        };
+
+        const showAt=(nextIndex)=>{
+            if(!el||!img) return;
+            if(!sources.length) return;
+            const n=Number(nextIndex);
+            index=Math.max(0,Math.min(sources.length-1,Number.isFinite(n)?n:0));
+            setImage(sources[index]);
+            updateNav();
+        };
+
+        const prev=()=>{
+            if(!isActive()||sources.length<=1) return;
+            reset();
+            showAt((index-1+sources.length)%sources.length);
+        };
+        const next=()=>{
+            if(!isActive()||sources.length<=1) return;
+            reset();
+            showAt((index+1)%sources.length);
+        };
 
         const zoomTo=(nextScale,cx,cy)=>{
             if(!img) return;
@@ -3811,6 +4290,18 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             if(!isActive()) return;
             if(pointers.size===1){
                 const p=Array.from(pointers.values())[0];
+                const canSwipe=sources.length>1 && scale<=1.01;
+                if(canSwipe){
+                    if(!gesture||gesture.type!=='swipe'){gesture={type:'swipe',startX:p.x,startY:p.y,lastX:p.x,lastY:p.y};return;}
+                    gesture.lastX=p.x; gesture.lastY=p.y;
+                    const dx=p.x-gesture.startX;
+                    const shift=Math.max(-120,Math.min(120,dx*0.6));
+                    tx=shift; ty=0;
+                    apply();
+                    return;
+                }
+
+                if(scale<=1.01) return;
                 if(!gesture||gesture.type!=='pan'){gesture={type:'pan',lastX:p.x,lastY:p.y};return;}
                 const dx=p.x-gesture.lastX; const dy=p.y-gesture.lastY;
                 tx+=dx; ty+=dy;
@@ -3860,8 +4351,22 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         const onPointerUp=(e)=>{
             if(!isActive()) return;
             pointers.delete(e.pointerId);
+            if(pointers.size===0){
+                if(gesture&&gesture.type==='swipe'){
+                    const dx=(gesture.lastX-gesture.startX);
+                    const dy=(gesture.lastY-gesture.startY);
+                    const absX=Math.abs(dx); const absY=Math.abs(dy);
+                    const shouldFlip=sources.length>1 && absX>60 && absX>absY*1.2;
+                    tx=0; ty=0; apply();
+                    gesture=null;
+                    if(shouldFlip){ if(dx<0) next(); else prev(); }
+                } else {
+                    gesture=null;
+                }
+                if(img) img.style.cursor=scale>1.01?'grab':'zoom-in';
+                return;
+            }
             gesture=null;
-            if(pointers.size===0){ if(img) img.style.cursor=scale>1.01?'grab':'zoom-in'; return; }
             updateFromPointers();
         };
         const onDblClick=(e)=>{
@@ -3875,6 +4380,9 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             if(inited) return;
             el=document.getElementById('lightbox');
             img=document.getElementById('lightbox-image');
+            prevBtn=document.getElementById('lightbox-prev');
+            nextBtn=document.getElementById('lightbox-next');
+            counterEl=document.getElementById('lightbox-counter');
             if(!el||!img) return;
             inited=true;
             el.addEventListener('wheel',onWheel,{passive:false});
@@ -3883,27 +4391,42 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
             img.addEventListener('pointerup',onPointerUp);
             img.addEventListener('pointercancel',onPointerUp);
             img.addEventListener('dblclick',onDblClick);
+            document.addEventListener('keydown',(e)=>{
+                if(!isActive()) return;
+                if(e.key==='Escape'){close();}
+                else if(e.key==='ArrowLeft'){prev();}
+                else if(e.key==='ArrowRight'){next();}
+            });
+            updateNav();
         };
 
-        const open=(src)=>{
+        const open=(srcOrList,startIndex=0)=>{
             init();
             if(!el||!img) return;
-            img.src=src||'';
+            sources=normalizeList(srcOrList);
+            if(!sources.length) sources=[PLACEHOLDER];
+            const n=Number(startIndex);
+            index=Math.max(0,Math.min(sources.length-1,Number.isFinite(n)?n:0));
             el.classList.add('active');
             reset();
+            showAt(index);
         };
         const close=()=>{
             if(!el||!img) return;
             el.classList.remove('active');
             el.classList.remove('zoomed');
+            sources=[]; index=0;
+            updateNav();
             reset();
             setTimeout(()=>{if(img) img.src='';},200);
         };
-        return {open,close};
+        return {open,close,prev,next};
     })();
 
-    function openLightbox(src){LightboxController.open(ProxyManager ? ProxyManager.getProxiedUrl(src) : src)}
+    function openLightbox(srcOrList,startIndex=0){LightboxController.open(srcOrList,startIndex)}
     function closeLightbox(){LightboxController.close()}
+    function lightboxPrev(){if(LightboxController&&LightboxController.prev) LightboxController.prev()}
+    function lightboxNext(){if(LightboxController&&LightboxController.next) LightboxController.next()}
 
     // 提示词卡片图片加载失败时的兜底：优先回退直连，再回退占位图（可被代理）
     function handlePromptImageError(imgEl){
