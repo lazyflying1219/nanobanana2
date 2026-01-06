@@ -368,19 +368,253 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
         // 创建进度条 HTML
         createHTML(id) {
             return `
-                <div style="margin: 20px 0; padding: 12px 16px; background: #f8f9fa; border-radius: 8px; border: 1px solid #e8eaed;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-                        <span style="font-size: 13px; color: #5f6368; font-weight: 500;">🎨 图片生成中</span>
-                        <span id="${id}-text" style="font-size: 13px; color: #1967d2; font-weight: 600;">0%</span>
+                <div class="gen-progress-card" data-progress-id="${id}">
+                    <div class="gen-progress-head">
+                        <span class="gen-progress-title">图片生成中</span>
+                        <span id="${id}-text" class="gen-progress-percent">0%</span>
                     </div>
-                    <div style="width: 100%; height: 6px; background: #e8eaed; border-radius: 3px; overflow: hidden;">
-                        <div id="${id}" style="width: 0%; height: 100%; background: linear-gradient(90deg, #1967d2, #4285f4); border-radius: 3px; transition: width 0.3s ease;"></div>
+                    <div class="gen-progress-track">
+                        <div id="${id}" class="gen-progress-bar" style="width:0%;"></div>
                     </div>
-                    <div style="font-size: 11px; color: #80868b; margin-top: 6px;">根据分辨率预估时间，实际可能有偏差</div>
+                    <div class="gen-progress-foot">
+                        <div id="${id}-status" class="gen-progress-status">根据分辨率预估时间，实际可能有偏差</div>
+                        <div class="gen-progress-actions">
+                            <button id="${id}-stop" class="gen-progress-btn stop" onclick="cancelGeneration('${id}')">停止</button>
+                            <button id="${id}-retry" class="gen-progress-btn retry" onclick="retryGeneration('${id}')" disabled>重试</button>
+                        </div>
+                    </div>
+                    <div id="${id}-error" class="gen-progress-error" style="display:none;"></div>
+                    <div id="${id}-stream" class="gen-stream" style="display:none;">
+                        <div class="gen-stream-title">流式输出</div>
+                        <div id="${id}-stream-content" class="gen-stream-content"></div>
+                    </div>
                 </div>
             `;
         }
     };
+
+    function sleepWithSignal(ms, signal) {
+        return new Promise((resolve, reject) => {
+            if (signal && signal.aborted) {
+                reject(new DOMException('Aborted', 'AbortError'));
+                return;
+            }
+            const timer = setTimeout(resolve, ms);
+            if (signal) {
+                signal.addEventListener('abort', () => {
+                    clearTimeout(timer);
+                    reject(new DOMException('Aborted', 'AbortError'));
+                }, { once: true });
+            }
+        });
+    }
+
+    const GenerationTaskManager = {
+        tasks: new Map(),
+
+        estimateTimeoutMs(resolution, hasRefImages = false) {
+            const seconds = SmartProgressBar.estimateTime(resolution, hasRefImages);
+            const ms = Math.round(seconds * 1000 * 5 + 30000);
+            return Math.min(480000, Math.max(120000, ms));
+        },
+
+        getTask(progressId) {
+            const id = String(progressId || '').trim();
+            return id ? this.tasks.get(id) : null;
+        },
+
+        setStatus(progressId, text, { kind = 'info' } = {}) {
+            const id = String(progressId || '').trim();
+            if (!id) return;
+            const el = document.getElementById(id + '-status');
+            if (!el) return;
+            el.textContent = String(text || '').trim() || '';
+            el.dataset.kind = kind;
+        },
+
+        setError(progressId, text) {
+            const id = String(progressId || '').trim();
+            if (!id) return;
+            const el = document.getElementById(id + '-error');
+            if (!el) return;
+            const msg = String(text || '').trim();
+            if (!msg) {
+                el.style.display = 'none';
+                el.textContent = '';
+                return;
+            }
+            el.textContent = msg;
+            el.style.display = '';
+        },
+
+        setButtons(progressId, { stopEnabled, retryEnabled } = {}) {
+            const id = String(progressId || '').trim();
+            if (!id) return;
+            const stopBtn = document.getElementById(id + '-stop');
+            const retryBtn = document.getElementById(id + '-retry');
+            if (stopBtn && typeof stopEnabled === 'boolean') stopBtn.disabled = !stopEnabled;
+            if (retryBtn && typeof retryEnabled === 'boolean') retryBtn.disabled = !retryEnabled;
+        },
+
+        clearTimers(task) {
+            if (!task) return;
+            if (task.timeoutTimer) {
+                clearTimeout(task.timeoutTimer);
+                task.timeoutTimer = null;
+            }
+        },
+
+        register(progressId, params) {
+            const id = String(progressId || '').trim();
+            if (!id) return null;
+
+            const existing = this.tasks.get(id);
+            if (existing && existing.running) {
+                try { existing.controller && existing.controller.abort(); } catch (_) {}
+                this.clearTimers(existing);
+            }
+
+            const controller = new AbortController();
+            const hasRefImages = Array.isArray(params && params.imagesBase64) && params.imagesBase64.length > 0;
+            const resolution = (typeof state !== 'undefined' && state && state.resolution) ? state.resolution : '1K';
+            const timeoutMs = this.estimateTimeoutMs(resolution, hasRefImages);
+
+            const task = {
+                progressId: id,
+                params: params || {},
+                controller,
+                running: true,
+                cancelReason: '',
+                autoRetry429Used: false,
+                timeoutMs,
+                timeoutTimer: null
+            };
+            this.tasks.set(id, task);
+
+            this.setError(id, '');
+            this.setStatus(id, '生成中…', { kind: 'info' });
+            this.setButtons(id, { stopEnabled: true, retryEnabled: false });
+
+            task.timeoutTimer = setTimeout(() => {
+                const current = this.tasks.get(id);
+                if (!current || !current.running) return;
+                current.cancelReason = 'timeout';
+                this.setStatus(id, '请求超时，可能后端卡住了', { kind: 'warning' });
+                try { current.controller.abort(); } catch (_) {}
+            }, timeoutMs);
+
+            return task;
+        },
+
+        markRunning(progressId) {
+            const task = this.getTask(progressId);
+            if (!task) return;
+            task.running = true;
+            task.cancelReason = '';
+            this.setError(progressId, '');
+            this.setStatus(progressId, '生成中…', { kind: 'info' });
+            this.setButtons(progressId, { stopEnabled: true, retryEnabled: false });
+        },
+
+        markSuccess(progressId) {
+            const task = this.getTask(progressId);
+            if (!task) return;
+            task.running = false;
+            this.clearTimers(task);
+            this.setButtons(progressId, { stopEnabled: false, retryEnabled: false });
+            this.setError(progressId, '');
+            this.setStatus(progressId, '已完成', { kind: 'success' });
+            this.tasks.delete(String(progressId || '').trim());
+        },
+
+        markFailed(progressId, message) {
+            const task = this.getTask(progressId);
+            if (task) {
+                task.running = false;
+                this.clearTimers(task);
+            }
+            this.setStatus(progressId, '生成失败', { kind: 'error' });
+            this.setError(progressId, message);
+            this.setButtons(progressId, { stopEnabled: false, retryEnabled: true });
+        },
+
+        markCanceled(progressId, reason = 'manual') {
+            const task = this.getTask(progressId);
+            if (task) {
+                task.running = false;
+                this.clearTimers(task);
+            }
+            const label = reason === 'timeout' ? '请求超时，可重试' : '已停止，可重试';
+            this.setStatus(progressId, label, { kind: 'warning' });
+            this.setButtons(progressId, { stopEnabled: false, retryEnabled: true });
+        },
+
+        cancel(progressId) {
+            const task = this.getTask(progressId);
+            if (!task) return;
+            if (!task.running) return;
+            if (task.controller && !task.controller.signal.aborted) {
+                task.cancelReason = 'manual';
+                this.setStatus(progressId, '正在停止…', { kind: 'info' });
+                try { task.controller.abort(); } catch (_) {}
+            }
+        },
+
+        async retry(progressId) {
+            const id = String(progressId || '').trim();
+            if (!id) return;
+            const task = this.tasks.get(id);
+            if (!task || !task.params) {
+                showToast('无法重试：未找到生成任务', 'warning', 2200);
+                return;
+            }
+            if (task.running) {
+                showToast('正在生成中…', 'info', 1500);
+                return;
+            }
+            const { config, text, imagesBase64, loadingDiv, sessionId, options } = task.params;
+            if (!loadingDiv || !document.body.contains(loadingDiv)) {
+                showToast('当前任务界面已不存在，无法重试', 'warning', 2500);
+                return;
+            }
+
+            // 重新开始：进度条 + 会话生成状态
+            this.markRunning(id);
+            const hasRefImages = Array.isArray(imagesBase64) && imagesBase64.length > 0;
+            const resolution = (typeof state !== 'undefined' && state && state.resolution) ? state.resolution : '1K';
+            SmartProgressBar.start(id, resolution, hasRefImages);
+            markGenerationStart(sessionId, 1);
+            renderSessionList();
+
+            processGeneration(config, text, imagesBase64, loadingDiv, sessionId, id, { ...(options || {}), isManualRetry: true });
+        }
+    };
+
+    async function fetchWith429Retry(progressId, url, options, { maxRetries = 1, retryDelayMs = 1200 } = {}) {
+        const task = GenerationTaskManager.getTask(progressId);
+        const signal = options && options.signal;
+        let retriesLeft = Math.max(0, Number(maxRetries || 0));
+
+        // 同一个生成任务：只自动重试一次（避免多个请求各自重试导致更拥堵）
+        if (task && task.autoRetry429Used) retriesLeft = 0;
+
+        while (true) {
+            const res = await nativeFetch(url, options);
+            if (res && res.status === 429 && retriesLeft > 0) {
+                retriesLeft -= 1;
+                if (task) task.autoRetry429Used = true;
+                GenerationTaskManager.setStatus(progressId, `触发 429 限流，${Math.round(retryDelayMs / 100) / 10}s 后自动重试一次…`, { kind: 'warning' });
+                try { res.body && res.body.cancel && res.body.cancel(); } catch (_) {}
+                await sleepWithSignal(retryDelayMs, signal);
+                GenerationTaskManager.setStatus(progressId, '生成中…', { kind: 'info' });
+                continue;
+            }
+            return res;
+        }
+    }
+
+    function cancelGeneration(progressId) { GenerationTaskManager.cancel(progressId); }
+    function retryGeneration(progressId) { GenerationTaskManager.retry(progressId); }
 
     // 错误处理工具
     const ErrorHandler = {
@@ -1113,17 +1347,24 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                  const link = this.normalizeText(current.tweet, '');
                  const mode = this.inferAiArtMode(prompt);
  
+                 // 让分类更“可用”：用内容推断一个主分类，而不是固定写死来源名
+                 const inferred = this.inferAiArtPrimaryCategory(title, prompt);
+                 const category = inferred && inferred !== 'AIArtPics' ? inferred : '其他';
+                 const tags = [];
+                 tags.push(/[\u4e00-\u9fff]/.test(prompt) ? '中文' : '英文');
+                 if (images.length > 1) tags.push('多图');
+ 
                  items.push({
                      id,
                      title,
                      prompt,
-                     category: 'DracoHu',
-                     sub_category: 'Twitter Collection',
+                     category,
+                     sub_category: '',
                      mode,
                      preview: images[0] || placeholder,
                      author: author || 'DracoHu',
                      link,
-                     tags: ['Twitter'],
+                     tags,
                      images
                  });
  
@@ -1596,25 +1837,49 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
              return signals.some(s => t.includes(s)) ? 'edit' : 'generate';
          },
          inferAiArtPrimaryCategory(title, prompt) {
-             const raw = `${this.normalizeText(title, '')}\n${this.normalizeText(prompt, '')}`.toLowerCase();
-             const rules = [
-                 { tag: '信息图', keys: ['infographic', '信息图', 'diagram', '图解'] },
-                 { tag: '表情包', keys: ['line', 'sticker', '表情包', 'スタンプ', 'emoji'] },
-                 { tag: '海报', keys: ['poster', '海报'] },
-                 { tag: '产品展示', keys: ['product', 'packaging', '包装', '产品'] },
-                 { tag: '人像', keys: ['portrait', '人像', '肖像'] },
-                 { tag: '摄影', keys: ['photography', 'photo', 'photoreal', '照片', '摄影'] },
-                 { tag: '插画', keys: ['illustration', '插画'] },
-                 { tag: '3D', keys: ['3d', '三维', 'c4d', 'blender'] },
-                 { tag: 'UI', keys: ['ui', '界面', 'app ui', '网页'] },
-                 { tag: 'Logo', keys: ['logo', '标志'] },
-                 { tag: '建筑', keys: ['architecture', '建筑'] },
-                 { tag: '风景', keys: ['landscape', '风景'] },
-                 { tag: '美食', keys: ['food', '美食'] }
-             ];
-             const hit = rules.find(rule => rule.keys.some(k => raw.includes(k)));
-             return hit ? hit.tag : 'AIArtPics';
-         },
+              const raw = `${this.normalizeText(title, '')}\n${this.normalizeText(prompt, '')}`.toLowerCase();
+              const hasKey = (key) => {
+                  const k = String(key || '').toLowerCase().trim();
+                  if (!k) return false;
+                  // 避免短英文词误命中（例如 ink 命中 think、ui 命中 build）
+                  if (/^[a-z0-9]+$/.test(k) && k.length <= 3) {
+                      try { return new RegExp(`\\b${k}\\b`, 'i').test(raw); } catch (_) { return raw.includes(k); }
+                  }
+                  return raw.includes(k);
+              };
+              const rules = [
+                  { tag: '信息图', keys: ['infographic', '信息图', 'diagram', '图解', 'data viz', 'data-viz', '数据可视化', 'chart', '图表'] },
+                  { tag: '表情包', keys: ['表情包', 'スタンプ', 'sticker', 'stickers', 'emoji', 'emote', 'line sticker', 'line stickers'] },
+                  { tag: '海报', keys: ['poster', '海报'] },
+                  { tag: '产品展示', keys: ['product', 'packaging', 'mockup', '包装', '产品'] },
+                  { tag: 'PPT', keys: ['ppt', 'presentation', 'slide', 'deck', '幻灯片'] },
+                  { tag: 'Logo', keys: ['logo', 'logotype', '标志', '徽标'] },
+                  { tag: '界面/UI', keys: ['ui', '界面', 'app ui', 'web ui', 'dashboard', 'landing page', '网页'] },
+                  { tag: '3D', keys: ['3d', '三维', 'c4d', 'blender', 'octane', 'unreal'] },
+                  { tag: '电影感/剧照', keys: ['cinematic', 'film still', 'movie still', 'anamorphic', 'shot on'] },
+                  { tag: '人像', keys: ['portrait', 'headshot', '人像', '肖像', '写真'] },
+                  { tag: '摄影', keys: ['photography', 'photo', 'photoreal', '照片', '摄影', 'dslr', 'bokeh'] },
+                  { tag: '建筑', keys: ['architecture', '建筑', 'interior', '室内'] },
+                  { tag: '风景', keys: ['landscape', '风景', 'nature', 'sunset'] },
+                  { tag: '地图', keys: ['map', '地图'] },
+                  { tag: '赛博/科幻', keys: ['cyberpunk', 'sci-fi', 'scifi', '赛博', '科幻', 'futuristic'] },
+                  { tag: '复古/怀旧', keys: ['retro', 'vintage', '复古', '怀旧'] },
+                  { tag: '极简', keys: ['minimal', 'minimalism', 'minimalist', '极简', '简约'] },
+                  { tag: '像素', keys: ['pixel art', 'pixel', '像素'] },
+                  { tag: '等距', keys: ['isometric', '等距'] },
+                  { tag: 'Q版', keys: ['chibi', 'q-style', 'q style', 'q版'] },
+                  { tag: '水彩', keys: ['watercolor', '水彩'] },
+                  { tag: '油画', keys: ['oil painting', '油画'] },
+                  { tag: '水墨/中国风', keys: ['ink wash', 'chinese ink', '水墨', '中国风', 'ink'] },
+                  { tag: '动漫/漫画', keys: ['anime', 'manga', '漫画', '二次元', 'アニメ', 'マンガ'] },
+                  { tag: '漫画/分镜', keys: ['comic', 'graphic novel', 'panel', '分镜'] },
+                  { tag: '素描/线稿', keys: ['line art', 'lineart', 'sketch', '素描', '线稿', 'pencil'] },
+                  { tag: '插画', keys: ['illustration', '插画', 'drawing', 'draw', 'painting', 'paint'] },
+                  { tag: '美食', keys: ['food', '美食'] }
+              ];
+              const hit = rules.find(rule => rule.keys.some(hasKey));
+              return hit ? hit.tag : 'AIArtPics';
+          },
          parseAiArtPicsMarkdown(text) {
              const placeholder = this.getPlaceholderPreview();
              const lines = String(text || '').split(/\r?\n/);
@@ -3608,12 +3873,14 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
     }
 
     async function processGeneration(config,text,imagesBase64,loadingDiv,sessionId,progressId,options={}){
-        const useStreaming = typeof options.useStreaming === 'boolean' ? options.useStreaming : state.useStreaming;
-        let ended = false;
-        const endOnce = () => { if (ended) return; ended = true; markGenerationEnd(sessionId); renderSessionList(); };
-        try{
-            let data;
-            if (config.type === 'openai') {
+         const useStreaming = typeof options.useStreaming === 'boolean' ? options.useStreaming : state.useStreaming;
+         let ended = false;
+         const endOnce = () => { if (ended) return; ended = true; markGenerationEnd(sessionId); renderSessionList(); };
+         try{
+             const task = progressId ? GenerationTaskManager.register(progressId, { config, text, imagesBase64, loadingDiv, sessionId, options }) : null;
+             const signal = task && task.controller ? task.controller.signal : undefined;
+             let data;
+             if (config.type === 'openai') {
                 // 构建消息数组
                 let messages = [];
                 let contextImages = []; // 收集上下文中的历史图片
@@ -3687,23 +3954,30 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     'Content-Type': 'application/json'
                 };
 
-                const res = await nativeFetch(requestUrl, {
-                    method: 'POST',
-                    headers: requestHeaders,
-                    body: JSON.stringify(payload)
-                });
-                
-                if (!res.ok) {
-                    const errorData = await res.json();
-                    endOnce();
-                    throw new Error(JSON.stringify(errorData));
-                }
-                
-                if (useStreaming) {
-                    data = await parseStreamResponse(res, loadingDiv, sessionId);
-                } else {
-                    data = await res.json();
-                }
+                const res = await fetchWith429Retry(progressId, requestUrl, {
+                     method: 'POST',
+                     headers: requestHeaders,
+                    body: JSON.stringify(payload),
+                    signal
+                 });
+                 
+                 if (!res.ok) {
+                     let errorText = '';
+                     try { errorText = await res.text(); } catch (_) { errorText = ''; }
+                     let errorData = null;
+                     if (errorText) {
+                         try { errorData = JSON.parse(errorText); } catch (_) { errorData = null; }
+                     }
+                     endOnce();
+                     const payload = errorData || { error: { message: errorText || `HTTP ${res.status}` }, status: res.status };
+                     throw new Error(JSON.stringify(payload));
+                 }
+                 
+                 if (useStreaming) {
+                    data = await parseStreamResponse(res, loadingDiv, sessionId, progressId);
+                 } else {
+                     data = await res.json();
+                 }
                 
                 endOnce();
 
@@ -3720,11 +3994,11 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     if (dataUrlMatch || httpUrlMatch) {
                         if (streamTextDiv && sessionId === currentSessionId) {
                             const contentEl = document.getElementById('stream-text-content');
-                            if (contentEl) {
-                                const currentText = contentEl.textContent.replace('[图片生成中...]', '');
-                                if (currentText.trim()) {
-                                    contentEl.innerHTML = escapeHtml(currentText) + '<div style="margin-top:12px;"><div class="loading-spinner" style="display:inline-block; margin-right:8px;"></div><span style="color:#666; font-size:12px;">正在加载图片...</span></div>';
-                                } else {
+                             if (contentEl) {
+                                  const currentText = contentEl.textContent.replace('[图片生成中...]', '');
+                                  if (currentText.trim()) {
+                                      contentEl.innerHTML = escapeHtml(currentText) + '<div style="margin-top:12px;"><div class="loading-spinner" style="display:inline-block; margin-right:8px;"></div><span style="color:#666; font-size:12px;">正在加载图片...</span></div>';
+                                  } else {
                                     contentEl.innerHTML = '<div style="margin-top:12px;"><div class="loading-spinner" style="display:inline-block; margin-right:8px;"></div><span style="color:#666; font-size:12px;">正在加载图片...</span></div>';
                                 }
                             }
@@ -3734,16 +4008,16 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                             imageData = dataUrlMatch[1].split(',')[1];
                             textContent = content.replace(/!\[.*?\]\((data:image\/[^)]+)\)/g, '').trim();
                         } else if (httpUrlMatch) {
-                            const imageUrl = httpUrlMatch[1];
-                            textContent = content.replace(/!\[.*?\]\((https?:\/\/[^)]+)\)/g, '').trim();
-                            try {
-                                const finalUrl = ProxyManager ? ProxyManager.getProxiedUrl(imageUrl) : imageUrl;
-                                const imgRes = await nativeFetch(finalUrl);
-                                const blob = await imgRes.blob();
-                                imageData = await new Promise((resolve) => {
-                                    const reader = new FileReader();
-                                    reader.onloadend = () => resolve(reader.result.split(',')[1]);
-                                    reader.readAsDataURL(blob);
+                             const imageUrl = httpUrlMatch[1];
+                             textContent = content.replace(/!\[.*?\]\((https?:\/\/[^)]+)\)/g, '').trim();
+                             try {
+                                const fetcher = (ProxyManager && ProxyManager.isEnabled()) ? ProxyManager : null;
+                                const imgRes = fetcher ? await fetcher.fetch(imageUrl, { signal }) : await nativeFetch(imageUrl, { signal });
+                                 const blob = await imgRes.blob();
+                                 imageData = await new Promise((resolve) => {
+                                     const reader = new FileReader();
+                                     reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                                     reader.readAsDataURL(blob);
                                 });
                             } catch (e) {
                                 console.error('Failed to fetch image from URL:', e);
@@ -3776,6 +4050,8 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                         } else {
                             streamTextDiv.remove();
                         }
+                        if(progressId) SmartProgressBar.stop(progressId);
+                        if(progressId) GenerationTaskManager.markSuccess(progressId);
                         return;
                     }
                 }
@@ -3836,15 +4112,26 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                     'x-goog-api-key': config.key
                 };
 
-                const res = await nativeFetch(requestUrl, {
-                    method: 'POST',
-                    headers: requestHeaders,
-                    body: JSON.stringify(payload)
-                });
-                data = await res.json();
-                endOnce();
-                if (!res.ok) throw new Error(JSON.stringify(data));
-            }
+                 const res = await fetchWith429Retry(progressId, requestUrl, {
+                      method: 'POST',
+                      headers: requestHeaders,
+                     body: JSON.stringify(payload),
+                     signal
+                  });
+                 if (!res.ok) {
+                     let errorText = '';
+                     try { errorText = await res.text(); } catch (_) { errorText = ''; }
+                     let errorData = null;
+                     if (errorText) {
+                         try { errorData = JSON.parse(errorText); } catch (_) { errorData = null; }
+                     }
+                     endOnce();
+                     const payload = errorData || { error: { message: errorText || `HTTP ${res.status}` }, status: res.status };
+                     throw new Error(JSON.stringify(payload));
+                 }
+                 data = await res.json();
+                 endOnce();
+             }
             const streamTextDiv = data.streamTextDiv;
 
             let botInnerHtml='';
@@ -3927,6 +4214,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                             streamTextDiv.remove();
                             console.log('💾 保存bot消息（文本+图片），图片数量:', generatedImages.length);
                             const botMsgId = await saveMessage(sessionId,'bot','Text and Image',generatedImages,combinedHtml);
+                            if(progressId) GenerationTaskManager.markSuccess(progressId);
                             if(sessionId===currentSessionId){
                                 // 完成进度条
                                 if(progressId) {
@@ -3954,6 +4242,7 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 }
                 console.log('💾 保存bot消息（仅图片），图片数量:', generatedImages.length);
                 const botMsgId = await saveMessage(sessionId,'bot','Image Generated',generatedImages,botInnerHtml);
+                if(progressId) GenerationTaskManager.markSuccess(progressId);
                 if(sessionId===currentSessionId){
                     // 完成进度条
                     if(progressId) {
@@ -3997,7 +4286,42 @@ function escapeHtml(text) { return text.replace(/[&<>"']/g, m => ({ '&': '&amp;'
                 streamDiv.closest('.message-row').remove();
             }
 
-            endOnce(); let msg=e.message; try{const jsonErr=JSON.parse(e.message);if(jsonErr.error&&jsonErr.error.message)msg=jsonErr.error.message}catch(_){} const errorHtml=`<div class="msg-content" style="color:#d93025">❌ Error: ${escapeHtml(msg)}</div>`; const errorMsgId = await saveMessage(sessionId,'bot','Error',[],errorHtml); if(sessionId===currentSessionId){ if(loadingDiv)loadingDiv.remove(); appendMessageToUI('bot',errorHtml,'Error',[],errorMsgId) }
+            endOnce();
+
+            const isAbort = !!(e && (e.name === 'AbortError' || String(e.message || '').toLowerCase().includes('abort')));
+            if (progressId && isAbort) {
+                const task = GenerationTaskManager.getTask(progressId);
+                const reason = (task && task.cancelReason) ? task.cancelReason : 'manual';
+                GenerationTaskManager.markCanceled(progressId, reason);
+                return;
+            }
+
+            let msg = (e && e.message) ? e.message : String(e || '');
+            try {
+                const jsonErr = JSON.parse(msg);
+                if (jsonErr && typeof jsonErr === 'object') {
+                    msg = (jsonErr.error && jsonErr.error.message) ? jsonErr.error.message : (jsonErr.message || msg);
+                }
+            } catch (_) {}
+
+            // 典型错误做友好化，避免直接把“内部解析异常”丢给用户
+            if (/Bad control character in string literal in JSON/i.test(msg)) {
+                msg = '接口返回了非标准 JSON（包含未转义换行/控制字符），建议切换渠道/模型或关闭流式输出后重试';
+            } else if (/\\b429\\b/.test(msg)) {
+                msg = '触发 429 限流，请稍后再试（可点击重试）';
+            }
+
+            if (progressId) {
+                GenerationTaskManager.markFailed(progressId, msg);
+                return;
+            }
+
+            const errorHtml = `<div class="msg-content" style="color:#d93025">❌ Error: ${escapeHtml(msg)}</div>`;
+            const errorMsgId = await saveMessage(sessionId,'bot','Error',[],errorHtml);
+            if(sessionId===currentSessionId){
+                if(loadingDiv)loadingDiv.remove();
+                appendMessageToUI('bot',errorHtml,'Error',[],errorMsgId);
+            }
         }
     }
 

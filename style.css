@@ -2159,6 +2159,136 @@
             color: white;
         }
 
+        /* 单图生成进度卡片（停止/重试） */
+        .gen-progress-card {
+            box-sizing: border-box;
+            width: calc(100% - 20px);
+            margin-left: 20px;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 14px 16px;
+            box-shadow: var(--shadow-sm);
+        }
+        .gen-progress-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            gap: 12px;
+        }
+        .gen-progress-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+        .gen-progress-percent {
+            font-size: 12px;
+            color: var(--text-sub);
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
+        }
+        .gen-progress-track {
+            height: 8px;
+            width: 100%;
+            background: var(--hover-color);
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .gen-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary-color), #4285f4);
+            border-radius: 999px;
+            transition: width 0.2s ease;
+        }
+        .gen-progress-foot {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+        .gen-progress-status {
+            font-size: 12px;
+            color: var(--text-sub);
+            line-height: 1.4;
+        }
+        .gen-progress-status[data-kind="warning"] { color: #b06000; }
+        .gen-progress-status[data-kind="error"] { color: #d93025; }
+        .gen-progress-status[data-kind="success"] { color: #1e8e3e; }
+        .gen-progress-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .gen-progress-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            background: #fff;
+            color: #5f6368;
+            border: 1px solid #dadce0;
+            border-radius: 16px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-weight: 500;
+            user-select: none;
+        }
+        .gen-progress-btn:hover {
+            background: #f8f9fa;
+            color: var(--primary-color);
+            border-color: #d2e3fc;
+        }
+        .gen-progress-btn:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+        .gen-progress-btn.stop {
+            color: #d93025;
+            border-color: #fad2cf;
+            background: #fff0f0;
+        }
+        .gen-progress-btn.stop:hover {
+            background: #fce8e6;
+            border-color: #d93025;
+            color: #d93025;
+        }
+        .gen-progress-btn.retry {
+            color: var(--primary-color);
+        }
+        .gen-progress-error {
+            margin-top: 10px;
+            background: #fce8e6;
+            border: 1px solid #f9b3b3;
+            border-radius: 12px;
+            padding: 10px 12px;
+            font-size: 12px;
+            color: #d93025;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+        [data-theme="dark"] .gen-progress-btn {
+            background: var(--card-bg);
+            color: var(--text-main);
+            border-color: var(--border-color);
+        }
+        [data-theme="dark"] .gen-progress-btn:hover {
+            background: var(--hover-color);
+            border-color: var(--border-color);
+        }
+        [data-theme="dark"] .gen-progress-btn.stop {
+            background: rgba(217, 48, 37, 0.16);
+            border-color: rgba(217, 48, 37, 0.35);
+            color: #f28b82;
+        }
+        [data-theme="dark"] .gen-progress-error {
+            background: rgba(217, 48, 37, 0.14);
+            border-color: rgba(217, 48, 37, 0.35);
+            color: #f28b82;
+        }
+
 
         @media (max-width: 768px) {
             body { flex-direction: column; }
